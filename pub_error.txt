@@ -1,0 +1,3 @@
+Resolving dependencies...
+Because fyp_app depends on audioplayers_ios any which doesn't exist (could not find package audioplayers_ios at https://pub.dev), version solving failed.
+Failed to update packages.
