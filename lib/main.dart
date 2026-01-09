@@ -9,9 +9,9 @@ import 'services/api_service.dart';
 import 'services/audio_service.dart';
 import 'services/logging_service.dart';
 import 'services/voice_control_service.dart';
-import 'services/store_service.dart';
-
-enum AppMode { idle, vision, navigation }
+import 'services/yolo_service.dart';
+import 'services/scene_manager.dart';
+import 'widgets/camera_painter.dart';
 
 
 void main() async {
@@ -51,26 +51,30 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
   final LoggingService _loggingService = LoggingService();
   final VoiceControlService _voiceService = VoiceControlService();
   final AudioService _audioService = AudioService();
-  final StoreService _storeService = StoreService();
+  
+  // New Services
+  final YoloService _yoloService = YoloService();
+  late SceneManager _sceneManager;
 
-
-  bool _isProcessing = false;
-  String _statusText = "Ready to Scan";
-  int _countdown = 10;
-  AppMode _currentMode = AppMode.idle;
-  bool _isCameraInitialized = false;
+  bool _isProcessingFrame = false;
+  List<Map<String, dynamic>> _detections = [];
+  String _statusText = "Initializing...";
+  bool _isListening = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _sceneManager = SceneManager(_ttsService);
     _initializeServices();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _cameraService.stopImageStream();
     _cameraService.dispose();
+    _yoloService.dispose();
     super.dispose();
   }
 
@@ -82,238 +86,128 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
 
     if (statuses[Permission.camera]!.isGranted &&
         statuses[Permission.microphone]!.isGranted) {
-      // Don't initialize camera yet - wait for Vision Scan
-      await _ttsService.initialize();
-      await _loggingService.initialize();
       
-      bool speechAvailable = await _voiceService.initialize(() {
-        if (!_isProcessing) {
-          _analyzeVideoFlow();
-        }
-      });
+      await _loggingService.initialize();
+      await _ttsService.initialize();
+      await _cameraService.initialize();
+      await _yoloService.initialize();
 
-      if (speechAvailable) {
-        _voiceService.startListening();
-        if (mounted) {
-          setState(() {
-            _statusText = "Listening for 'START'...";
-          });
-        }
-        _ttsService.speak("App ready. Say START to begin.");
+      if (_yoloService.isLoaded && _cameraService.isInitialized) {
+        setState(() => _statusText = "Starting Vision...");
+        _startLiveFeed();
       } else {
-        if (mounted) {
-          setState(() {
-            _statusText = "Voice trigger unavailable";
-          });
-        }
-        _ttsService.speak("Voice trigger is unavailable. Please use the on-screen button.");
+        setState(() => _statusText = "Initialization Failed");
       }
     } else {
       setState(() => _statusText = "Permissions denied");
     }
   }
 
-  Future<void> _ensureCameraOn() async {
-    if (!_isCameraInitialized) {
-      setState(() => _statusText = "Starting Camera...");
-      await _cameraService.initialize();
-      if (mounted) {
-        setState(() {
-          _isCameraInitialized = true;
-          _statusText = "Camera Ready";
-        });
-      }
-    }
-  }
+  void _startLiveFeed() {
+    _cameraService.startImageStream((CameraImage image) async {
+      if (_isProcessingFrame) return;
 
-  Future<void> _ensureCameraOff() async {
-    if (_isCameraInitialized) {
-      await _cameraService.dispose();
-      if (mounted) {
-        setState(() {
-          _isCameraInitialized = false;
-          _statusText = "Camera Off";
-        });
-      }
-    }
-  }
-
-  Future<void> _analyzeVideoFlow() async {
-    if (_isProcessing) return;
-
-    setState(() {
-      _isProcessing = true;
-      _currentMode = AppMode.vision;
-      _countdown = 10;
-    });
-
-    try {
-      await _voiceService.stopListening();
-      
-      // Ensure camera is active for Vision Scan
-      await _ensureCameraOn();
-      
-      // Delay to allow microphone/hardware to release from voice service
-      await Future.delayed(const Duration(milliseconds: 1000));
-      
-      if (!mounted) return;
-      
-      await _cameraService.startVideoRecording();
-      await _audioService.startRecording();
-      _ttsService.speak("Recording started. Please move the camera and ask your question.");
-
-      // 10 Second Countdown
-      for (int i = 10; i > 0; i--) {
-        if (!mounted) return;
+      _isProcessingFrame = true;
+      try {
+        final detections = await _yoloService.runInference(image);
         
-        // WATCHDOG: Check if recording is still active
-        if (_cameraService.controller == null || !_cameraService.controller!.value.isRecordingVideo) {
-          throw Exception("Recording stopped unexpectedly.");
+        // Use the image width from the camera image for spatial calculations
+        // Note: CameraImage width usually reflects the buffer width (e.g. 720 or 1280 depending on orientation)
+        _sceneManager.processDetections(detections, image.width.toDouble());
+
+        if (mounted) {
+          setState(() {
+            _detections = detections;
+            // Update status text with main objects if not listening
+            if (!_isListening && detections.isNotEmpty) {
+               final labels = detections.map((d) => d['tag']).toSet().join(", ");
+               _statusText = "Seeing: $labels";
+            } else if (!_isListening) {
+               _statusText = "Scanning...";
+            }
+          });
         }
-
-        setState(() {
-          _statusText = "Recording: $i seconds left";
-          _countdown = i;
-        });
-        await Future.delayed(const Duration(seconds: 1));
+      } catch (e) {
+        // print("Frame processing error: $e");
+      } finally {
+        _isProcessingFrame = false;
       }
-
-      setState(() => _statusText = "Processing scan...");
-      final XFile? videoFile = await _cameraService.stopVideoRecording();
-      File? audioQueryFile = await _audioService.stopRecording();
-      
-      // Filter out 'empty' or extremely silent audio files (less than 10KB)
-      if (audioQueryFile != null && await audioQueryFile.exists()) {
-        final int fileSize = await audioQueryFile.length();
-        if (fileSize < 10000) { // 10KB threshold
-          print("Audio query too small ($fileSize bytes). Filtering as empty.");
-          audioQueryFile = null;
-        }
-      }
-      
-      if (videoFile != null) {
-        final result = await _apiService.analyzeVideo(
-          videoFile: File(videoFile.path),
-          audioFile: audioQueryFile,
-        );
-        
-        // Log to file
-        await _loggingService.logDetectedItems(result);
-        
-        // Update UI and Speak
-        setState(() {
-          _statusText = "Found: $result";
-          _isProcessing = false;
-        });
-        await _ttsService.speak("Found: $result");
-        _voiceService.startListening();
-      }
-    } catch (e) {
-      setState(() {
-        _isProcessing = false;
-        _statusText = "Error: $e";
-      });
-      _ttsService.speak("An error occurred during scanning.");
-      _voiceService.startListening();
-    }
+    });
   }
 
-  Future<void> _analyzeNavigationFlow() async {
-    if (_isProcessing) return;
-
+  Future<void> _handleUserQuery() async {
+    // Pause inference or ignore alerts while listening?
+    // Better to just listen.
     setState(() {
-      _isProcessing = true;
-      _currentMode = AppMode.navigation;
-      _statusText = "Initializing Navigation...";
+      _isListening = true;
+      _statusText = "Listening for query...";
     });
+    
+    // Haptic feedback
+    // await Vibration.vibrate(duration: 100); 
 
-    try {
-      await _voiceService.stopListening();
-      
-      // Turn off camera for Navigation
-      await _ensureCameraOff();
-      
-      // Prompt user
-      await _ttsService.speak("What are you looking for?");
-      
-      // Handover delay
-      await Future.delayed(const Duration(milliseconds: 1500));
-      
-      if (!mounted) return;
-      
-      // Record for 5 seconds
-      await _audioService.startRecording();
-      
-      for (int i = 5; i > 0; i--) {
-        if (!mounted) return;
-        setState(() {
-          _statusText = "Listening: $i...";
-          _countdown = i;
-        });
-        await Future.delayed(const Duration(seconds: 1));
-      }
+    await _cameraService.stopImageStream(); // Pause vision to save resource/noise
 
-      setState(() => _statusText = "Locating item...");
-      final File? audioFile = await _audioService.stopRecording();
+    String? query = await _voiceService.listenForQuery();
+    
+    if (query != null && query.isNotEmpty) {
+      setState(() => _statusText = "Thinking...");
       
-      if (audioFile != null) {
-        final String context = _storeService.getMapContext();
-        final result = await _apiService.analyzeNavigationQuery(
-          audioFile: audioFile,
-          storeMapContext: context,
-        );
-        
-        setState(() {
-          _statusText = result;
-          _isProcessing = false;
-        });
-        await _ttsService.speak(result);
-        _voiceService.startListening();
-      } else {
-        throw Exception("No audio captured.");
-      }
-    } catch (e) {
-      setState(() {
-        _isProcessing = false;
-        _statusText = "Nav Error: $e";
-      });
-      _ttsService.speak("Navigation failed. Please try again.");
-      _voiceService.startListening();
+      // Get latest scene state from SceneManager logic or better yet, 
+      // since we stopped stream, we use the last known state.
+      // Ideally we should have kept the stream running to get the 'latest' frame context 
+      // BUT for simplicity and resource safety, using the last state is okay for "what is in front of me".
+      // Actually, if we stopped stream, `_detections` holds the last frame's data.
+      // However, `SceneManager` handles the high-level logic.
+      // We'll trust the tracking in SceneManager or just re-construct from `_detections`.
+      
+      // To ensure we have good context, let's presume the user is pointing at what they want to know about.
+      // We pass the image width used in last inference?
+      // Let's assume a default or store it.
+      // SceneManager keeps track? No, currently it processes instantly.
+      // We should probably rely on `_sceneManager.getSceneSummary(width)` but we need width.
+      // Let's fix SceneManager usage or just pass a standard valid width (e.g. 720).
+      
+      String sceneSummary = _sceneManager.getSceneSummary(); // Uses stored width
+      
+      String response = await _apiService.chatWithGemini(sceneSummary, query);
+      
+      setState(() => _statusText = response);
+      await _ttsService.speak(response);
+    } else {
+      setState(() => _statusText = "Didn't hear you.");
+      await _ttsService.speak("I didn't hear a question.");
     }
+
+    // Resume
+    setState(() => _isListening = false);
+    _startLiveFeed();
   }
 
   @override
   Widget build(BuildContext context) {
-    final Size size = MediaQuery.of(context).size;
-    
+    if (!_cameraService.isInitialized) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    // Prepare Painter
+    // We need to pass the detections.
+    // NOTE: We need to handle scaling.
+    // CameraPreview fits the screen.
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Conditional Camera Preview
+          // Camera View
           Positioned.fill(
-            child: (_isCameraInitialized && _cameraService.controller != null && _cameraService.controller!.value.isInitialized)
-                ? CameraPreview(_cameraService.controller!)
-                : Container(
-                    color: Colors.black,
-                    child: Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            _currentMode == AppMode.navigation ? Icons.map : Icons.videocam_off,
-                            size: 80,
-                            color: Colors.white24,
-                          ),
-                          const SizedBox(height: 20),
-                          Text(
-                            _currentMode == AppMode.navigation ? "NAVIGATION MODE" : "CAMERA INACTIVE",
-                            style: const TextStyle(color: Colors.white38, letterSpacing: 2),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+            child: CameraPreview(_cameraService.controller!),
+          ),
+          
+          // Bounding Boxes
+          Positioned.fill(
+             child: CustomPaint(
+               painter: CameraPainter(detections: _detections),
+             ),
           ),
 
           // Status Overlay
@@ -324,69 +218,58 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
             child: Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: Colors.black87,
+                color: Colors.black54,
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.blueAccent, width: 2),
               ),
               child: Text(
                 _statusText,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
               ),
             ),
           ),
 
-          // Action Buttons
+          // Voice Query Button
           Align(
             alignment: Alignment.bottomCenter,
             child: Padding(
-              padding: const EdgeInsets.only(bottom: 30),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // Vision Scan Button
-                  SizedBox(
-                    width: size.width * 0.85,
-                    height: 100,
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _isProcessing ? Colors.grey : Colors.blueAccent,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                        elevation: 10,
-                      ),
-                      onPressed: _isProcessing ? null : _analyzeVideoFlow,
-                      child: _isProcessing
-                          ? const CircularProgressIndicator(color: Colors.white)
-                          : const Text(
-                              "VISION SCAN",
-                              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
-                            ),
-                    ),
+              padding: const EdgeInsets.only(bottom: 50),
+              child: GestureDetector(
+                onTap: _handleUserQuery,
+                onDoubleTap: () {
+                    // Double tap could trigger a silent "Read Scene"
+                },
+                child: Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: _isListening ? Colors.redAccent : Colors.blueAccent,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(color: Colors.blue.withOpacity(0.5), blurRadius: 20, spreadRadius: 5)
+                    ],
                   ),
-                  const SizedBox(height: 20),
-                  // Navigation Button
-                  SizedBox(
-                    width: size.width * 0.85,
-                    height: 100,
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _isProcessing ? Colors.grey : Colors.orangeAccent,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                        elevation: 10,
-                      ),
-                      onPressed: _isProcessing ? null : _analyzeNavigationFlow,
-                      child: _isProcessing
-                          ? const Text("PROCESSING...")
-                          : const Text(
-                              "STORES NAVIGATION",
-                              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
-                            ),
-                    ),
+                  child: Icon(
+                    _isListening ? Icons.hearing : Icons.mic,
+                    color: Colors.white,
+                    size: 40,
                   ),
-                ],
+                ),
               ),
             ),
           ),
+          
+          // Hint Text
+          const Positioned(
+            bottom: 20,
+            left: 0,
+            right: 0,
+            child: Text(
+              "Tap mic to ask about the scene",
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70),
+            ),
+          )
         ],
       ),
     );

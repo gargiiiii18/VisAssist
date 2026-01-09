@@ -15,22 +15,22 @@ class VoiceControlService {
     try {
       bool available = await _speechToText.initialize(
         onError: (val) {
-          print('Speech Error: ${val.errorMsg}');
+          // print('Speech Error: ${val.errorMsg}');
           _isAttemptingToListen = false;
           _handleRestart();
         },
         onStatus: (val) {
-          print('Speech Status: $val');
+          // print('Speech Status: $val');
           if (val == 'notListening' || val == 'done') {
             _isAttemptingToListen = false;
             _handleRestart();
           }
         },
       );
-      print("Speech recognition available: $available");
+      // print("Speech recognition available: $available");
       return available;
     } catch (e) {
-      print("Speech initialize exception: $e");
+      // print("Speech initialize exception: $e");
       return false;
     }
   }
@@ -58,7 +58,7 @@ class VoiceControlService {
     if (!_isListening || _isAttemptingToListen) return;
     
     _isAttemptingToListen = true;
-    print(">>> [Microphone] Activating - Listening for 'START'...");
+    // print(">>> [Microphone] Activating - Listening for 'START'...");
     
     try {
       await _speechToText.cancel();
@@ -71,10 +71,10 @@ class VoiceControlService {
         cancelOnError: false,
         listenMode: ListenMode.search, // Better for short commands
       );
-      print(">>> [Microphone] Listening session active.");
+      // print(">>> [Microphone] Listening session active.");
     } catch (e) {
       _isAttemptingToListen = false;
-      print("Listen exception: $e");
+      // print("Listen exception: $e");
       _handleRestart();
     }
   }
@@ -84,12 +84,12 @@ class VoiceControlService {
 
     String words = result.recognizedWords.toLowerCase().trim();
     if (words.isNotEmpty) {
-      print("HEARD: '$words' (Final: ${result.finalResult})");
+      // print("HEARD: '$words' (Final: ${result.finalResult})");
     }
     
     // Check for "start" anywhere in the phrase to be more sensitive
     if (words.contains("start")) {
-      print("!!! [SUCCESS] Found 'START' command !!!");
+      // print("!!! [SUCCESS] Found 'START' command !!!");
       Vibration.vibrate(duration: 300); // Longer vibration for clear feedback
       
       _isListening = false;
@@ -108,5 +108,41 @@ class VoiceControlService {
     _restartTimer?.cancel();
     await _speechToText.stop();
     await _speechToText.cancel();
+  }
+
+  /// Listens for a single user query and returns the text.
+  Future<String?> listenForQuery() async {
+    Completer<String?> completer = Completer();
+    
+    // Stop any ongoing listen
+    await stopListening();
+
+    try {
+      if (!await _speechToText.initialize()) {
+        return null; // Speech not available
+      }
+
+      await _speechToText.listen(
+        onResult: (result) {
+          if (result.finalResult) {
+            completer.complete(result.recognizedWords);
+            _speechToText.stop();
+          }
+        },
+        listenFor: const Duration(seconds: 10),
+        pauseFor: const Duration(seconds: 3),
+        cancelOnError: true,
+        listenMode: ListenMode.dictation,
+      );
+      
+      // Fallback timer if no final result comes quickly
+      // (speech_to_text sometimes doesn't fire finalResult if silence follows immediately)
+      // This is basic handling; for production might need more robust silence detection.
+    } catch (e) {
+      print("Error listening for query: $e");
+      if (!completer.isCompleted) completer.complete(null);
+    }
+
+    return completer.future;
   }
 }

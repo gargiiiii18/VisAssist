@@ -15,7 +15,7 @@ class CameraService {
     try {
       _cameras = await availableCameras();
       if (_cameras == null || _cameras!.isEmpty) {
-        print("No cameras found");
+        // print("No cameras found");
         return;
       }
 
@@ -34,7 +34,7 @@ class CameraService {
       await _controller!.initialize();
       _isInitialized = true;
     } catch (e) {
-      print("Error initializing camera: $e");
+      // print("Error initializing camera: $e");
       _isInitialized = false;
     }
   }
@@ -42,14 +42,14 @@ class CameraService {
   /// Captures a photo and returns the XFile.
   Future<XFile?> takePicture() async {
     if (!_isInitialized || _controller == null) {
-      print("Camera not initialized");
+      // print("Camera not initialized");
       return null;
     }
 
     try {
       return await _controller!.takePicture();
     } catch (e) {
-      print("Error taking picture: $e");
+      // print("Error taking picture: $e");
       return null;
     }
   }
@@ -60,7 +60,7 @@ class CameraService {
     try {
       await _controller!.startVideoRecording();
     } catch (e) {
-      print("Error starting video recording: $e");
+      // print("Error starting video recording: $e");
     }
   }
 
@@ -69,14 +69,36 @@ class CameraService {
     try {
       return await _controller!.stopVideoRecording();
     } catch (e) {
-      print("Error stopping video recording: $e");
+      // print("Error stopping video recording: $e");
       return null;
     }
   }
 
+  /// Starts the image stream for object detection.
+  Future<void> startImageStream(Function(CameraImage) onImage) async {
+    if (!_isInitialized || _controller == null) return;
+    try {
+      await _controller!.startImageStream(onImage);
+    } catch (e) {
+      // print("Error starting image stream: $e");
+    }
+  }
+
+  /// Stops the image stream.
+  Future<void> stopImageStream() async {
+    if (!_isInitialized || _controller == null) return;
+    try {
+      if (_controller!.value.isStreamingImages) {
+        await _controller!.stopImageStream();
+      }
+    } catch (e) {
+      // print("Error stopping image stream: $e");
+    }
+  }
+
   /// Disposes the camera controller.
-  Future<void> dispose() async {
-    await _controller?.dispose();
+  void dispose() {
+    _controller?.dispose();
     _isInitialized = false;
   }
 }
