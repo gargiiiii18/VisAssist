@@ -1,0 +1,47 @@
+Analyzing fyp_app...                                            
+
+warning - Unused import: 'package:flutter_vision/flutter_vision.dart' - lib\main.dart:5:8 - unused_import
+warning - The value of the field '_countdown' isn't used - lib\main.dart:59:7 - unused_field
+   info - Uses 'await' on an instance of 'void', which is not a subtype of 'Future' - lib\main.dart:131:7 - await_only_futures
+  error - This expression has a type of 'void' so its value can't be used - lib\main.dart:131:28 - use_of_void_result
+   info - Don't invoke 'print' in production code - lib\main.dart:189:11 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\api_service.dart:76:9 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\api_service.dart:80:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\api_service.dart:135:9 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\api_service.dart:139:7 - avoid_print
+warning - Dead code - lib\services\audio_service.dart:21:43 - dead_code
+warning - The left operand can't be null, so the right operand is never executed - lib\services\audio_service.dart:21:46 - dead_null_aware_expression
+   info - Don't invoke 'print' in production code - lib\services\audio_service.dart:30:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\audio_service.dart:39:7 - avoid_print
+warning - Dead code - lib\services\audio_service.dart:41:41 - dead_code
+warning - The left operand can't be null, so the right operand is never executed - lib\services\audio_service.dart:41:44 - dead_null_aware_expression
+   info - Don't invoke 'print' in production code - lib\services\audio_service.dart:50:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\camera_service.dart:18:9 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\camera_service.dart:37:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\camera_service.dart:45:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\camera_service.dart:52:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\camera_service.dart:63:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\camera_service.dart:72:7 - avoid_print
+warning - The '!' will have no effect because the receiver can't be null - lib\services\logging_service.dart:37:33 - unnecessary_non_null_assertion
+   info - Don't invoke 'print' in production code - lib\services\logging_service.dart:39:5 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\logging_service.dart:40:5 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\logging_service.dart:41:5 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\logging_service.dart:50:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\logging_service.dart:51:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\logging_service.dart:52:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\logging_service.dart:54:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\voice_control_service.dart:18:11 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\voice_control_service.dart:23:11 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\voice_control_service.dart:30:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\voice_control_service.dart:33:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\voice_control_service.dart:61:5 - avoid_print
+   info - 'partialResults' is deprecated and shouldn't be used. Use SpeechListenOptions.partialResults instead - lib\services\voice_control_service.dart:70:9 - deprecated_member_use
+   info - 'cancelOnError' is deprecated and shouldn't be used. Use SpeechListenOptions.cancelOnError instead - lib\services\voice_control_service.dart:71:9 - deprecated_member_use
+   info - 'listenMode' is deprecated and shouldn't be used. Use SpeechListenOptions.listenMode instead - lib\services\voice_control_service.dart:72:9 - deprecated_member_use
+   info - Don't invoke 'print' in production code - lib\services\voice_control_service.dart:74:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\voice_control_service.dart:77:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\voice_control_service.dart:87:7 - avoid_print
+   info - Don't invoke 'print' in production code - lib\services\voice_control_service.dart:92:7 - avoid_print
+  error - The name 'MyApp' isn't a class - test\widget_test.dart:16:35 - creation_with_non_type
+
+43 issues found. (ran in 12.6s)
