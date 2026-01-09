@@ -81,4 +81,63 @@ class ApiService {
       return "Error connecting to AI service.";
     }
   }
+
+  /// Uses Gemini to map an audio query to a store aisle and provide directions.
+  Future<String> analyzeNavigationQuery({required File audioFile, required String storeMapContext}) async {
+    final url = Uri.parse(
+        'https://generativelanguage.googleapis.com/v1beta/models/$_model:generateContent?key=$_apiKey');
+
+    try {
+      final audioBytes = await audioFile.readAsBytes();
+      final base64Audio = base64Encode(audioBytes);
+
+      String systemPrompt = "You are a store navigation assistant for the visually impaired. "
+          "You are provided with a hardcoded map of the store aisles and their contents:\n\n"
+          "$storeMapContext\n\n"
+          "The user is asking for the location of an item in the provided audio. "
+          "INSTRUCTIONS: "
+          "1. Identify the item the user is looking for from the audio. "
+          "2. Match that item to the most relevant Aisle in the map context above. "
+          "3. Respond with a clear sentence that identifies the aisle and provides the EXACT directions listed for that aisle. "
+          "4. If the item is not found in any aisle categories, use your intuition to pick the most logical aisle (e.g., 'Pens' belong in 'Stationery'). "
+          "5. If the item is completely irrelevant to a shopping store, politely say you couldn't find it in the store layout. "
+          "6. Keep the response concise and oriented toward a blind user.";
+
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          "contents": [
+            {
+              "parts": [
+                {"text": systemPrompt},
+                {
+                  "inline_data": {
+                    "mime_type": "audio/m4a",
+                    "data": base64Audio,
+                  }
+                },
+              ]
+            }
+          ],
+          "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 512,
+          }
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final text = data['candidates'][0]['content']['parts'][0]['text'];
+        return text?.trim() ?? "No directions found.";
+      } else {
+        print("Navigation API Error: ${response.body}");
+        return "Navigation service is currently unreachable.";
+      }
+    } catch (e) {
+      print("Navigation Exception: $e");
+      return "Something went wrong with the navigation query.";
+    }
+  }
 }

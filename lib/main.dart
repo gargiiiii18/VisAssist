@@ -9,6 +9,9 @@ import 'services/api_service.dart';
 import 'services/audio_service.dart';
 import 'services/logging_service.dart';
 import 'services/voice_control_service.dart';
+import 'services/store_service.dart';
+
+enum AppMode { idle, vision, navigation }
 
 
 void main() async {
@@ -48,11 +51,14 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
   final LoggingService _loggingService = LoggingService();
   final VoiceControlService _voiceService = VoiceControlService();
   final AudioService _audioService = AudioService();
+  final StoreService _storeService = StoreService();
 
 
   bool _isProcessing = false;
   String _statusText = "Ready to Scan";
   int _countdown = 10;
+  AppMode _currentMode = AppMode.idle;
+  bool _isCameraInitialized = false;
 
   @override
   void initState() {
@@ -76,7 +82,7 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
 
     if (statuses[Permission.camera]!.isGranted &&
         statuses[Permission.microphone]!.isGranted) {
-      await _cameraService.initialize();
+      // Don't initialize camera yet - wait for Vision Scan
       await _ttsService.initialize();
       await _loggingService.initialize();
       
@@ -107,16 +113,45 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
     }
   }
 
+  Future<void> _ensureCameraOn() async {
+    if (!_isCameraInitialized) {
+      setState(() => _statusText = "Starting Camera...");
+      await _cameraService.initialize();
+      if (mounted) {
+        setState(() {
+          _isCameraInitialized = true;
+          _statusText = "Camera Ready";
+        });
+      }
+    }
+  }
+
+  Future<void> _ensureCameraOff() async {
+    if (_isCameraInitialized) {
+      await _cameraService.dispose();
+      if (mounted) {
+        setState(() {
+          _isCameraInitialized = false;
+          _statusText = "Camera Off";
+        });
+      }
+    }
+  }
+
   Future<void> _analyzeVideoFlow() async {
     if (_isProcessing) return;
 
     setState(() {
       _isProcessing = true;
+      _currentMode = AppMode.vision;
       _countdown = 10;
     });
 
     try {
       await _voiceService.stopListening();
+      
+      // Ensure camera is active for Vision Scan
+      await _ensureCameraOn();
       
       // Delay to allow microphone/hardware to release from voice service
       await Future.delayed(const Duration(milliseconds: 1000));
@@ -183,20 +218,102 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
     }
   }
 
+  Future<void> _analyzeNavigationFlow() async {
+    if (_isProcessing) return;
+
+    setState(() {
+      _isProcessing = true;
+      _currentMode = AppMode.navigation;
+      _statusText = "Initializing Navigation...";
+    });
+
+    try {
+      await _voiceService.stopListening();
+      
+      // Turn off camera for Navigation
+      await _ensureCameraOff();
+      
+      // Prompt user
+      await _ttsService.speak("What are you looking for?");
+      
+      // Handover delay
+      await Future.delayed(const Duration(milliseconds: 1500));
+      
+      if (!mounted) return;
+      
+      // Record for 5 seconds
+      await _audioService.startRecording();
+      
+      for (int i = 5; i > 0; i--) {
+        if (!mounted) return;
+        setState(() {
+          _statusText = "Listening: $i...";
+          _countdown = i;
+        });
+        await Future.delayed(const Duration(seconds: 1));
+      }
+
+      setState(() => _statusText = "Locating item...");
+      final File? audioFile = await _audioService.stopRecording();
+      
+      if (audioFile != null) {
+        final String context = _storeService.getMapContext();
+        final result = await _apiService.analyzeNavigationQuery(
+          audioFile: audioFile,
+          storeMapContext: context,
+        );
+        
+        setState(() {
+          _statusText = result;
+          _isProcessing = false;
+        });
+        await _ttsService.speak(result);
+        _voiceService.startListening();
+      } else {
+        throw Exception("No audio captured.");
+      }
+    } catch (e) {
+      setState(() {
+        _isProcessing = false;
+        _statusText = "Nav Error: $e";
+      });
+      _ttsService.speak("Navigation failed. Please try again.");
+      _voiceService.startListening();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (_cameraService.controller == null || !_cameraService.controller!.value.isInitialized) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
-
     final Size size = MediaQuery.of(context).size;
     
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         children: [
+          // Conditional Camera Preview
           Positioned.fill(
-            child: CameraPreview(_cameraService.controller!),
+            child: (_isCameraInitialized && _cameraService.controller != null && _cameraService.controller!.value.isInitialized)
+                ? CameraPreview(_cameraService.controller!)
+                : Container(
+                    color: Colors.black,
+                    child: Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            _currentMode == AppMode.navigation ? Icons.map : Icons.videocam_off,
+                            size: 80,
+                            color: Colors.white24,
+                          ),
+                          const SizedBox(height: 20),
+                          Text(
+                            _currentMode == AppMode.navigation ? "NAVIGATION MODE" : "CAMERA INACTIVE",
+                            style: const TextStyle(color: Colors.white38, letterSpacing: 2),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
           ),
 
           // Status Overlay
@@ -219,36 +336,54 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
             ),
           ),
 
-          // Action Button
+          // Action Buttons
           Align(
             alignment: Alignment.bottomCenter,
             child: Padding(
-              padding: const EdgeInsets.only(bottom: 50),
-              child: SizedBox(
-                width: size.width * 0.85,
-                height: 120,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _isProcessing ? Colors.grey : Colors.blueAccent,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                    elevation: 10,
+              padding: const EdgeInsets.only(bottom: 30),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Vision Scan Button
+                  SizedBox(
+                    width: size.width * 0.85,
+                    height: 100,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _isProcessing ? Colors.grey : Colors.blueAccent,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                        elevation: 10,
+                      ),
+                      onPressed: _isProcessing ? null : _analyzeVideoFlow,
+                      child: _isProcessing
+                          ? const CircularProgressIndicator(color: Colors.white)
+                          : const Text(
+                              "VISION SCAN",
+                              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
+                            ),
+                    ),
                   ),
-                  onPressed: _isProcessing ? null : _analyzeVideoFlow,
-                  child: _isProcessing
-                      ? Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const CircularProgressIndicator(color: Colors.white),
-                            const SizedBox(height: 8),
-                            Text("SCANNING...", style: TextStyle(fontSize: 14, color: Colors.white.withOpacity(0.8))),
-                          ],
-                        )
-                      : const Text(
-                          "START 10S VIDEO SCAN",
-                          textAlign: TextAlign.center,
-                          style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
-                        ),
-                ),
+                  const SizedBox(height: 20),
+                  // Navigation Button
+                  SizedBox(
+                    width: size.width * 0.85,
+                    height: 100,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _isProcessing ? Colors.grey : Colors.orangeAccent,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                        elevation: 10,
+                      ),
+                      onPressed: _isProcessing ? null : _analyzeNavigationFlow,
+                      child: _isProcessing
+                          ? const Text("PROCESSING...")
+                          : const Text(
+                              "STORES NAVIGATION",
+                              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
+                            ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
