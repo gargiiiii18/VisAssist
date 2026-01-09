@@ -1,9 +1,10 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 /// Service to handle interactions with the Gemini API.
 class ApiService {
-  final String _apiKey = 'AIzaSyA3FlBMLWJvFbR7QebewsnFeiOtSbJOLnY';
+  final String _apiKey = dotenv.env['GEMINI_API_KEY'] ?? '';
   final String _model = 'gemini-flash-lite-latest';
 
   /// Sends scene context and user query to Gemini.
