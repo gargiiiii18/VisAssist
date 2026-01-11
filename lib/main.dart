@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_vision/flutter_vision.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+
 import 'services/camera_service.dart';
 import 'services/tts_service.dart';
 import 'services/api_service.dart';
@@ -11,10 +13,13 @@ import 'services/logging_service.dart';
 import 'services/voice_control_service.dart';
 import 'services/yolo_service.dart';
 import 'services/scene_manager.dart';
+import 'services/contact_service.dart';
+import 'services/sos_service.dart';
+
 import 'widgets/camera_painter.dart';
+import 'screens/feature_carousel.dart';
+import 'screens/sos_countdown_screen.dart';
 
-
-import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,19 +28,96 @@ void main() async {
   runApp(const VisionApp());
 }
 
-class VisionApp extends StatelessWidget {
+class VisionApp extends StatefulWidget {
   const VisionApp({super.key});
 
   @override
+  State<VisionApp> createState() => _VisionAppState();
+}
+
+class _VisionAppState extends State<VisionApp> {
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+  
+  // Singletons or App-Level Services
+  final ContactService _contactService = ContactService();
+  final TTSService _ttsService = TTSService();
+  final VoiceControlService _voiceService = VoiceControlService();
+  late SosService _sosService;
+
+  bool _isInitialized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeApp();
+  }
+
+  void _initializeApp() async {
+    await _ttsService.initialize();
+    await _contactService.initialize();
+    _sosService = SosService(_contactService, _ttsService);
+    
+    // Initialize SOS Fall Detection
+    _sosService.initialize(() {
+        // On Fall Detected
+        _navigatorKey.currentState?.push(
+            MaterialPageRoute(builder: (_) => SosCountdownScreen(
+                sosService: _sosService,
+                ttsService: _ttsService,
+                voiceService: _voiceService,
+            ))
+        );
+    });
+    // Start Monitoring Immediately
+    _sosService.startMonitoring();
+    
+    if (mounted) {
+      setState(() {
+        _isInitialized = true;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _sosService.stopMonitoring();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    if (!_isInitialized) {
+      return MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(brightness: Brightness.dark),
+        home: const Scaffold(
+          body: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 20),
+                Text("Initializing Vision AI...", style: TextStyle(fontSize: 18))
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return MaterialApp(
+      navigatorKey: _navigatorKey,
       debugShowCheckedModeBanner: false,
       title: 'Vision Assistant',
       theme: ThemeData(
         brightness: Brightness.dark,
         primarySwatch: Colors.blue,
       ),
-      home: const VisionHomePage(),
+      home: FeatureCarousel(
+        visionPage: const VisionHomePage(),
+        contactService: _contactService,
+        ttsService: _ttsService,
+      ), 
     );
   }
 }
@@ -47,9 +129,9 @@ class VisionHomePage extends StatefulWidget {
   State<VisionHomePage> createState() => _VisionHomePageState();
 }
 
-class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObserver {
+class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObserver, AutomaticKeepAliveClientMixin {
   final CameraService _cameraService = CameraService();
-  final TTSService _ttsService = TTSService();
+  final TTSService _ttsService = TTSService(); // Re-instantiated or could be passed
   final ApiService _apiService = ApiService();
   final LoggingService _loggingService = LoggingService();
   final VoiceControlService _voiceService = VoiceControlService();
@@ -63,6 +145,9 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
   List<Map<String, dynamic>> _detections = [];
   String _statusText = "Initializing...";
   bool _isListening = false;
+
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void initState() {
@@ -85,6 +170,8 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
     Map<Permission, PermissionStatus> statuses = await [
       Permission.camera,
       Permission.microphone,
+      Permission.sms, // Added SMS permission
+      Permission.location, // Added Location permission
     ].request();
 
     if (statuses[Permission.camera]!.isGranted &&
@@ -96,13 +183,15 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
       await _yoloService.initialize();
 
       if (_yoloService.isLoaded && _cameraService.isInitialized) {
-        setState(() => _statusText = "Starting Vision...");
+        if (mounted) setState(() => _statusText = "Starting Vision...");
         _startLiveFeed();
+        // Ensure TTS is ready
+        await _ttsService.speak("Vision Ready."); 
       } else {
-        setState(() => _statusText = "Initialization Failed");
+        if (mounted) setState(() => _statusText = "Initialization Failed");
       }
     } else {
-      setState(() => _statusText = "Permissions denied");
+      if (mounted) setState(() => _statusText = "Permissions denied");
     }
   }
 
@@ -115,7 +204,6 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
         final detections = await _yoloService.runInference(image);
         
         // Use the image width from the camera image for spatial calculations
-        // Note: CameraImage width usually reflects the buffer width (e.g. 720 or 1280 depending on orientation)
         _sceneManager.processDetections(detections, image.width.toDouble());
 
         if (mounted) {
@@ -139,37 +227,17 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
   }
 
   Future<void> _handleUserQuery() async {
-    // Pause inference or ignore alerts while listening?
-    // Better to just listen.
     setState(() {
       _isListening = true;
       _statusText = "Listening for query...";
     });
     
-    // Haptic feedback
-    // await Vibration.vibrate(duration: 100); 
-
     await _cameraService.stopImageStream(); // Pause vision to save resource/noise
 
     String? query = await _voiceService.listenForQuery();
     
     if (query != null && query.isNotEmpty) {
       setState(() => _statusText = "Thinking...");
-      
-      // Get latest scene state from SceneManager logic or better yet, 
-      // since we stopped stream, we use the last known state.
-      // Ideally we should have kept the stream running to get the 'latest' frame context 
-      // BUT for simplicity and resource safety, using the last state is okay for "what is in front of me".
-      // Actually, if we stopped stream, `_detections` holds the last frame's data.
-      // However, `SceneManager` handles the high-level logic.
-      // We'll trust the tracking in SceneManager or just re-construct from `_detections`.
-      
-      // To ensure we have good context, let's presume the user is pointing at what they want to know about.
-      // We pass the image width used in last inference?
-      // Let's assume a default or store it.
-      // SceneManager keeps track? No, currently it processes instantly.
-      // We should probably rely on `_sceneManager.getSceneSummary(width)` but we need width.
-      // Let's fix SceneManager usage or just pass a standard valid width (e.g. 720).
       
       String sceneSummary = _sceneManager.getSceneSummary(); // Uses stored width
       
@@ -189,14 +257,12 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // Required for AutomaticKeepAliveClientMixin
+    
     if (!_cameraService.isInitialized) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    // Prepare Painter
-    // We need to pass the detections.
-    // NOTE: We need to handle scaling.
-    // CameraPreview fits the screen.
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
