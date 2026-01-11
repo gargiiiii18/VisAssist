@@ -1,11 +1,12 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 /// Service to handle interactions with the Gemini API.
 class ApiService {
   final String _apiKey = dotenv.env['GEMINI_API_KEY'] ?? '';
-  final String _model = 'gemini-flash-lite-latest';
+  final String _model = 'gemini-2.5-flash';
 
   /// Sends scene context and user query to Gemini.
   Future<String> chatWithGemini(String sceneContext, String userQuery) async {
@@ -40,12 +41,16 @@ class ApiService {
         String? text = data['candidates'][0]['content']['parts'][0]['text'];
         return text?.trim() ?? "I couldn't understand the response.";
       } else {
-        // print("API Error: ${response.body}");
-        return "Sorry, I am unable to connect to the assistant right now.";
+        print("API Error: ${response.body}");
+        final errorData = jsonDecode(response.body);
+        String errorMsg = errorData['error']['message'] ?? "Unknown API Error";
+        return "AI Error: $errorMsg";
       }
+    } on SocketException {
+      return "No Internet Connection. Please check your Wi-Fi or Data.";
     } catch (e) {
-      // print("Exception during Gemini chat: $e");
-      return "Error connecting to AI service.";
+      print("Exception during Gemini chat: $e");
+      return "Connection Error: ${e.toString()}";
     }
   }
 }
