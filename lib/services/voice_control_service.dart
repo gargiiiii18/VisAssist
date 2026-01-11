@@ -145,4 +145,55 @@ class VoiceControlService {
 
     return completer.future;
   }
+
+  /// Listens continuously for specific keywords for a set duration.
+  /// Returns the keyword found, or null if timeout.
+  Future<String?> listenForKeywords(List<String> keywords, Duration duration) async {
+    Completer<String?> completer = Completer();
+    
+    // Stop any ongoing listen
+    await stopListening();
+
+    try {
+      bool available = await _speechToText.initialize(); // Re-init to be sure
+      if (!available) {
+        return null;
+      }
+
+      await _speechToText.listen(
+        onResult: (result) {
+          String words = result.recognizedWords.toLowerCase();
+          // Check partial or final results
+          for (var keyword in keywords) {
+            if (words.contains(keyword.toLowerCase())) {
+               if (!completer.isCompleted) {
+                 completer.complete(keyword);
+                 _speechToText.stop();
+               }
+               return;
+            }
+          }
+        },
+        listenFor: duration, 
+        pauseFor: duration, // Don't pause on silence
+        cancelOnError: true,
+        partialResults: true, // Critical: check results as they come in
+        listenMode: ListenMode.dictation,
+      );
+      
+      // Complete with null after duration if nothing found
+      Future.delayed(duration, () {
+         if (!completer.isCompleted) {
+           completer.complete(null);
+           _speechToText.stop();
+         }
+      });
+
+    } catch (e) {
+      print("Error listening for keywords: $e");
+      if (!completer.isCompleted) completer.complete(null);
+    }
+
+    return completer.future;
+  }
 }

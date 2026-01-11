@@ -10,6 +10,7 @@ class TTSService {
     await _flutterTts.setSpeechRate(0.5);
     await _flutterTts.setVolume(1.0); // Set to maximum volume
     await _flutterTts.setPitch(1.0);
+    await _flutterTts.awaitSpeakCompletion(true);
   }
 
   /// Speaks the given text at maximum volume.
