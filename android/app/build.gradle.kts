@@ -39,6 +39,12 @@ android {
     }
 }
 
+configurations.all {
+    exclude(group = "org.tensorflow", module = "tensorflow-lite")
+    exclude(group = "org.tensorflow", module = "tensorflow-lite-api")
+    exclude(group = "org.tensorflow", module = "tensorflow-lite-gpu")
+}
+
 flutter {
     source = "../.."
 }
