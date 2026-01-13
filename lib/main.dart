@@ -15,6 +15,8 @@ import 'services/yolo_service.dart';
 import 'services/scene_manager.dart';
 import 'services/contact_service.dart';
 import 'services/sos_service.dart';
+import 'services/face_storage_service.dart';
+import 'services/face_recognition_service.dart';
 
 import 'widgets/camera_painter.dart';
 import 'screens/feature_carousel.dart';
@@ -42,6 +44,8 @@ class _VisionAppState extends State<VisionApp> {
   final ContactService _contactService = ContactService();
   final TTSService _ttsService = TTSService();
   final VoiceControlService _voiceService = VoiceControlService();
+  final FaceStorageService _faceStorage = FaceStorageService();
+  late FaceRecognitionService _faceRecognition;
   late SosService _sosService;
 
   bool _isInitialized = false;
@@ -55,6 +59,11 @@ class _VisionAppState extends State<VisionApp> {
   void _initializeApp() async {
     await _ttsService.initialize();
     await _contactService.initialize();
+    await _faceStorage.initialize();
+    
+    _faceRecognition = FaceRecognitionService(_faceStorage);
+    await _faceRecognition.initialize();
+    
     _sosService = SosService(_contactService, _ttsService);
     
     // Initialize SOS Fall Detection
@@ -81,6 +90,7 @@ class _VisionAppState extends State<VisionApp> {
   @override
   void dispose() {
     _sosService.stopMonitoring();
+    _faceRecognition.dispose();
     super.dispose();
   }
 
@@ -114,16 +124,18 @@ class _VisionAppState extends State<VisionApp> {
         primarySwatch: Colors.blue,
       ),
       home: FeatureCarousel(
-        visionPage: const VisionHomePage(),
         contactService: _contactService,
         ttsService: _ttsService,
+        faceStorage: _faceStorage,
+        faceRecognition: _faceRecognition,
       ), 
     );
   }
 }
 
 class VisionHomePage extends StatefulWidget {
-  const VisionHomePage({super.key});
+  final bool isActive;
+  const VisionHomePage({super.key, this.isActive = true});
 
   @override
   State<VisionHomePage> createState() => _VisionHomePageState();
@@ -154,7 +166,26 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _sceneManager = SceneManager(_ttsService);
-    _initializeServices();
+    if (widget.isActive) {
+       _initializeServices();
+    }
+  }
+
+  @override
+  void didUpdateWidget(VisionHomePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isActive && !oldWidget.isActive) {
+      // Switched TO this page
+      if (!_cameraService.isInitialized) {
+        _initializeServices();
+      } else {
+        _startLiveFeed();
+      }
+    } else if (!widget.isActive && oldWidget.isActive) {
+      // Switched AWAY from this page
+      _cameraService.stopImageStream();
+      _cameraService.dispose(); // Fully release camera for other tabs
+    }
   }
 
   @override
