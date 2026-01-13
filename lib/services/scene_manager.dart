@@ -53,12 +53,16 @@ class SceneManager {
     }
   }
 
-  double _lastImageWidth = 720.0; // Default fallback
+  int _sensorOrientation = 90;
+  double _lastImageWidth = 720.0;
+  double _lastImageHeight = 1280.0;
 
-  /// Processes detections with image width for spatial awareness
-  void processDetections(List<Map<String, dynamic>> detections, double imageWidth) {
+  /// Processes detections with image dimensions for spatial awareness
+  void processDetections(List<Map<String, dynamic>> detections, double imageWidth, double imageHeight, int sensorOrientation) {
     _currentDetections = detections;
     _lastImageWidth = imageWidth;
+    _lastImageHeight = imageHeight;
+    _sensorOrientation = sensorOrientation;
     
     // Safety Check
     if (DateTime.now().difference(_lastAlertTime).inSeconds < 4) return;
@@ -87,29 +91,67 @@ class SceneManager {
   /// Generates a summary of the current scene for Gemini
   String getSceneSummary() {
     if (_currentDetections.isEmpty) {
-      return "The scene is empty.";
+      return "The scene is currently empty of recognizable objects.";
     }
 
-    StringBuffer summary = StringBuffer("The current scene contains: ");
+    StringBuffer summary = StringBuffer("Current scene analysis:\n");
     List<String> objectDescriptions = [];
 
     for (var detection in _currentDetections) {
       String label = detection['tag'];
-      final box = detection['box'];
-      double centerX = (box[0] + box[2]) / 2;
-      double relativeX = centerX / _lastImageWidth;
+      final box = detection['box']; // [x1, y1, x2, y2, conf]
 
-      String position = "center";
-      if (relativeX < 0.35) {
-        position = "left";
-      } else if (relativeX > 0.65) {
-        position = "right";
-      }
+      // Calculate normalized sensor coordinates
+      double nx = (box[0] + box[2]) / (2 * _lastImageWidth);
+      double ny = (box[1] + box[3]) / (2 * _lastImageHeight);
       
-      objectDescriptions.add("$label at $position");
+      double screenX, screenY;
+
+      // Transform to screen space for summary logic
+      switch (_sensorOrientation) {
+        case 90:
+          screenX = 1.0 - ny;
+          screenY = nx;
+          break;
+        case 180:
+          screenX = 1.0 - nx;
+          screenY = 1.0 - ny;
+          break;
+        case 270:
+          screenX = ny;
+          screenY = 1.0 - nx;
+          break;
+        case 0:
+        default:
+          screenX = nx;
+          screenY = ny;
+          break;
+      }
+
+      // Determine spatial sector 
+      String horizontal = "center";
+      String vertical = "";
+      
+      if (screenX < 0.33) horizontal = "left";
+      else if (screenX > 0.66) horizontal = "right";
+
+      if (screenY < 0.33) vertical = "top ";
+      else if (screenY > 0.66) vertical = "bottom ";
+
+      String size = "medium-sized";
+      double width = (box[2] - box[0]) / _lastImageWidth;
+      double height = (box[3] - box[1]) / _lastImageHeight;
+      double area = width * height;
+      if (area > 0.4) size = "very large";
+      else if (area > 0.15) size = "large";
+      else if (area < 0.03) size = "small";
+
+      objectDescriptions.add(
+        "- A $size $label located at the $vertical$horizontal area (approx coordinates: x=${screenX.toStringAsFixed(2)}, y=${screenY.toStringAsFixed(2)})."
+      );
     }
 
-    summary.write(objectDescriptions.join(", "));
+    summary.write(objectDescriptions.join("\n"));
     return summary.toString();
   }
 }

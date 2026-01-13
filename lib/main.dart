@@ -157,6 +157,7 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
   List<Map<String, dynamic>> _detections = [];
   String _statusText = "Initializing...";
   bool _isListening = false;
+  Size _imageSize = Size.zero;
 
   @override
   bool get wantKeepAlive => true;
@@ -234,12 +235,18 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
       try {
         final detections = await _yoloService.runInference(image);
         
-        // Use the image width from the camera image for spatial calculations
-        _sceneManager.processDetections(detections, image.width.toDouble());
+        // Use the image dimensions from the camera image for spatial calculations
+        _sceneManager.processDetections(
+          detections, 
+          image.width.toDouble(), 
+          image.height.toDouble(),
+          _cameraService.controller!.description.sensorOrientation,
+        );
 
         if (mounted) {
           setState(() {
             _detections = detections;
+            _imageSize = Size(image.width.toDouble(), image.height.toDouble());
             // Update status text with main objects if not listening
             if (!_isListening && detections.isNotEmpty) {
                final labels = detections.map((d) => d['tag']).toSet().join(", ");
@@ -298,16 +305,24 @@ class _VisionHomePageState extends State<VisionHomePage> with WidgetsBindingObse
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Camera View
-          Positioned.fill(
-            child: CameraPreview(_cameraService.controller!),
-          ),
-          
-          // Bounding Boxes
-          Positioned.fill(
-             child: CustomPaint(
-               painter: CameraPainter(detections: _detections),
-             ),
+          // Camera View + Bounding Boxes
+          Center(
+            child: AspectRatio(
+              aspectRatio: 1 / _cameraService.controller!.value.aspectRatio, // Portrait aspect ratio
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CameraPreview(_cameraService.controller!),
+                  CustomPaint(
+                    painter: CameraPainter(
+                      detections: _detections,
+                      imageSize: _imageSize,
+                      sensorOrientation: _cameraService.controller!.description.sensorOrientation,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
 
           // Status Overlay
