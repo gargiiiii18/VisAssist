@@ -1,12 +1,11 @@
 import 'package:flutter/material.dart';
-import '../main.dart'; // For VisionHomePage access or move VisionHomePage to separate file if needed. 
-// Assuming VisionHomePage is accessible or we will refactor.
-// Ideally VisionHomePage should be in screens/.
-// Checks: main.dart has VisionHomePage. We can import main.dart but better to move it later.
-// For now, let's assume we pass it or import it.
+import '../main.dart';
 import 'contacts_page.dart';
+import 'face_recognition_screen.dart';
 import '../services/contact_service.dart';
 import '../services/tts_service.dart';
+import '../services/face_storage_service.dart';
+import '../services/face_recognition_service.dart';
 
 // Since VisionHomePage is in main.dart, we might have circular imports if main imports this.
 // To avoid this, we should really move VisionHomePage to `lib/screens/vision_home_page.dart`.
@@ -15,15 +14,17 @@ import '../services/tts_service.dart';
 // Let's create FeatureCarousel accepting the pages as children or builders.
 
 class FeatureCarousel extends StatefulWidget {
-  final Widget visionPage;
   final ContactService contactService;
   final TTSService ttsService;
+  final FaceStorageService faceStorage;
+  final FaceRecognitionService faceRecognition;
 
   const FeatureCarousel({
     super.key,
-    required this.visionPage,
     required this.contactService,
     required this.ttsService,
+    required this.faceStorage,
+    required this.faceRecognition,
   });
 
   @override
@@ -33,6 +34,7 @@ class FeatureCarousel extends StatefulWidget {
 class _FeatureCarouselState extends State<FeatureCarousel> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
+  int? _targetPage;
 
   @override
   Widget build(BuildContext context) {
@@ -44,14 +46,40 @@ class _FeatureCarouselState extends State<FeatureCarousel> {
           setState(() {
             _currentPage = index;
           });
-          String pageName = index == 0 ? "Vision Mode" : "Emergency Contacts";
-          widget.ttsService.speak(pageName);
+          
+          // Only speak if we reached the target page OR if it's a swipe (no targetPage set)
+          if (_targetPage == null || _targetPage == index) {
+            String pageName;
+            switch (index) {
+              case 0:
+                pageName = "Vision Mode";
+                break;
+              case 1:
+                pageName = "Emergency Contacts";
+                break;
+              case 2:
+                pageName = "Face Recognition";
+                break;
+              default:
+                pageName = "";
+            }
+            if (pageName.isNotEmpty) {
+              widget.ttsService.speak(pageName);
+            }
+            _targetPage = null; // Reset target
+          }
         },
         children: [
-          widget.visionPage,
+          VisionHomePage(isActive: _currentPage == 0),
           ContactsPage(
             contactService: widget.contactService,
             ttsService: widget.ttsService,
+          ),
+          FaceRecognitionScreen(
+            faceRecognition: widget.faceRecognition,
+            faceStorage: widget.faceStorage,
+            ttsService: widget.ttsService,
+            isActive: _currentPage == 2,
           ),
         ],
       ),
@@ -61,6 +89,9 @@ class _FeatureCarouselState extends State<FeatureCarousel> {
         unselectedItemColor: Colors.grey,
         currentIndex: _currentPage,
         onTap: (index) {
+            if (_currentPage == index) return;
+            
+            _targetPage = index;
             _pageController.animateToPage(
                 index, 
                 duration: const Duration(milliseconds: 300), 
@@ -70,6 +101,7 @@ class _FeatureCarouselState extends State<FeatureCarousel> {
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.camera_alt), label: "Vision"),
           BottomNavigationBarItem(icon: Icon(Icons.perm_contact_calendar), label: "Contacts"),
+          BottomNavigationBarItem(icon: Icon(Icons.face), label: "Faces"),
         ],
       ),
     );
