@@ -56,7 +56,12 @@ dependencies:
 
   # Face Recognition
   tflite_flutter: ^0.11.0
+  # Face Recognition
   google_mlkit_face_detection: ^0.11.1
+  
+  # Navigation
+  flutter_map: ^7.0.0
+  latlong2: ^0.9.1
 
 
 dev_dependencies:
