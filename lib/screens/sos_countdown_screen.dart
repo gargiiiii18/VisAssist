@@ -73,18 +73,27 @@ class _SosCountdownScreenState extends State<SosCountdownScreen> {
   }
   
   void _listenForCancel() async {
-    // Listen efficiently for the entire duration
-    // We add a buffer to the duration
-    final duration = Duration(seconds: _countdown + 2);
+    // Listen efficiently for the entire duration by looping
+    // If the recognizer times out early (silence), we restart it immediately.
     
-    String? keyword = await widget.voiceService.listenForKeywords(
-      ['cancel', 'okay', 'stop', 'no', 'fake', 'false'], 
-      duration
-    );
-    
-    if (mounted && keyword != null && _countdown > 0) {
-      print("SOS Cancelled by voice: $keyword");
-      _cancel();
+    while (_countdown > 0 && mounted) {
+      final duration = Duration(seconds: _countdown + 2);
+      
+      String? keyword = await widget.voiceService.listenForKeywords(
+        ['cancel', 'okay', 'stop', 'no', 'fake', 'false'], 
+        duration
+      );
+      
+      if (!mounted) return;
+
+      if (keyword != null && _countdown > 0) {
+        // print("SOS Cancelled by voice: $keyword");
+        _cancel();
+        return;
+      }
+
+      // If loop restarts, add small delay to be safe preventing tight error loops
+      await Future.delayed(const Duration(milliseconds: 100));
     }
   }
 

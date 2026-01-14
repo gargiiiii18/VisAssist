@@ -6,127 +6,65 @@ import 'dart:async';
 class VoiceControlService {
   final SpeechToText _speechToText = SpeechToText();
   bool _isListening = false;
-  bool _isAttemptingToListen = false;
-  Function? _onStartCommand;
-  Timer? _restartTimer;
+  bool _isInitialized = false;
+  
+  // Dynamic callbacks
+  Function(String)? _statusListener;
+  Function(SpeechRecognitionResult)? _resultListener;
 
-  Future<bool> initialize(Function onStartCommand) async {
-    _onStartCommand = onStartCommand;
+  Future<bool> initialize() async {
+    if (_isInitialized) return true;
+
     try {
-      bool available = await _speechToText.initialize(
+      _isInitialized = await _speechToText.initialize(
         onError: (val) {
-          // print('Speech Error: ${val.errorMsg}');
-          _isAttemptingToListen = false;
-          _handleRestart();
+          print('Speech Error: ${val.errorMsg}');
+          _statusListener?.call('error'); // Map error to status flow
         },
         onStatus: (val) {
-          // print('Speech Status: $val');
-          if (val == 'notListening' || val == 'done') {
-            _isAttemptingToListen = false;
-            _handleRestart();
-          }
+          print('Speech Status: $val');
+          _statusListener?.call(val);
         },
       );
-      // print("Speech recognition available: $available");
-      return available;
+      return _isInitialized;
     } catch (e) {
-      // print("Speech initialize exception: $e");
+      print("Speech initialize exception: $e");
       return false;
-    }
-  }
-
-  void _handleRestart() {
-    if (!_isListening) return;
-
-    _restartTimer?.cancel();
-    _restartTimer = Timer(const Duration(milliseconds: 800), () {
-      if (_isListening && !_speechToText.isListening && !_isAttemptingToListen) {
-        _startInternal();
-      }
-    });
-  }
-
-  Future<void> startListening() async {
-    _isListening = true;
-    _restartTimer?.cancel();
-    if (!_speechToText.isListening && !_isAttemptingToListen) {
-      await _startInternal();
-    }
-  }
-
-  Future<void> _startInternal() async {
-    if (!_isListening || _isAttemptingToListen) return;
-    
-    _isAttemptingToListen = true;
-    // print(">>> [Microphone] Activating - Listening for 'START'...");
-    
-    try {
-      await _speechToText.cancel();
-      
-      await _speechToText.listen(
-        onResult: _onSpeechResult,
-        listenFor: const Duration(minutes: 1),
-        pauseFor: const Duration(seconds: 10),
-        partialResults: true,
-        cancelOnError: false,
-        listenMode: ListenMode.search, // Better for short commands
-      );
-      // print(">>> [Microphone] Listening session active.");
-    } catch (e) {
-      _isAttemptingToListen = false;
-      // print("Listen exception: $e");
-      _handleRestart();
-    }
-  }
-
-  void _onSpeechResult(SpeechRecognitionResult result) {
-    if (!_isListening) return;
-
-    String words = result.recognizedWords.toLowerCase().trim();
-    if (words.isNotEmpty) {
-      // print("HEARD: '$words' (Final: ${result.finalResult})");
-    }
-    
-    // Check for "start" anywhere in the phrase to be more sensitive
-    if (words.contains("start")) {
-      // print("!!! [SUCCESS] Found 'START' command !!!");
-      Vibration.vibrate(duration: 300); // Longer vibration for clear feedback
-      
-      _isListening = false;
-      _speechToText.stop();
-      _restartTimer?.cancel();
-      
-      if (_onStartCommand != null) {
-        _onStartCommand!();
-      }
     }
   }
 
   Future<void> stopListening() async {
     _isListening = false;
-    _isAttemptingToListen = false;
-    _restartTimer?.cancel();
     await _speechToText.stop();
-    await _speechToText.cancel();
+    // Do not cancel instance, just stop listening
   }
 
   /// Listens for a single user query and returns the text.
   Future<String?> listenForQuery() async {
     Completer<String?> completer = Completer();
+    if (!_isInitialized) await initialize();
     
-    // Stop any ongoing listen
-    await stopListening();
+    // Use cancel to immediately clear previous session
+    if (_speechToText.isListening) await _speechToText.cancel();
+
+    String lastWords = "";
+
+    _statusListener = (status) {
+       if ((status == 'done' || status == 'notListening') && !completer.isCompleted) {
+         if (lastWords.isNotEmpty) {
+           completer.complete(lastWords);
+         } else {
+           completer.complete(null);
+         }
+       }
+    };
 
     try {
-      if (!await _speechToText.initialize()) {
-        return null; // Speech not available
-      }
-
       await _speechToText.listen(
         onResult: (result) {
-          if (result.finalResult) {
+          lastWords = result.recognizedWords;
+          if (result.finalResult && !completer.isCompleted) {
             completer.complete(result.recognizedWords);
-            _speechToText.stop();
           }
         },
         listenFor: const Duration(seconds: 10),
@@ -134,40 +72,49 @@ class VoiceControlService {
         cancelOnError: true,
         listenMode: ListenMode.dictation,
       );
-      
-      // Fallback timer if no final result comes quickly
-      // (speech_to_text sometimes doesn't fire finalResult if silence follows immediately)
-      // This is basic handling; for production might need more robust silence detection.
     } catch (e) {
-      print("Error listening for query: $e");
       if (!completer.isCompleted) completer.complete(null);
     }
-
     return completer.future;
   }
 
   /// Listens continuously for specific keywords for a set duration.
-  /// Returns the keyword found, or null if timeout.
+  /// Returns the keyword found, or null if timeout/silence.
   Future<String?> listenForKeywords(List<String> keywords, Duration duration) async {
     Completer<String?> completer = Completer();
     
-    // Stop any ongoing listen
-    await stopListening();
+    // Ensure initialized
+    if (!_isInitialized) {
+      bool success = await initialize();
+      if (!success) return null;
+    }
 
-    try {
-      bool available = await _speechToText.initialize(); // Re-init to be sure
-      if (!available) {
-        return null;
+    // Use cancel for faster restart
+    if (_speechToText.isListening) {
+      await _speechToText.cancel();
+    }
+
+    // Set up dynamic listeners for this session
+    _statusListener = (status) {
+      // If complete (done/notListening) and not yet found a keyword
+      if ((status == 'done' || status == 'notListening' || status == 'error') && !completer.isCompleted) {
+         // Tiny delay to ensure no final result is pending processing
+         Future.delayed(const Duration(milliseconds: 100), () {
+            if (!completer.isCompleted) completer.complete(null);
+         });
       }
-
+    };
+    
+    // Start Listening
+    try {
       await _speechToText.listen(
         onResult: (result) {
           String words = result.recognizedWords.toLowerCase();
-          // Check partial or final results
           for (var keyword in keywords) {
             if (words.contains(keyword.toLowerCase())) {
                if (!completer.isCompleted) {
                  completer.complete(keyword);
+                 // Stop purely to finalize this successful hit
                  _speechToText.stop();
                }
                return;
@@ -175,14 +122,17 @@ class VoiceControlService {
           }
         },
         listenFor: duration, 
-        pauseFor: duration, // Don't pause on silence
+        pauseFor: const Duration(seconds: 10), // Try to keep alive
         cancelOnError: true,
-        partialResults: true, // Critical: check results as they come in
+        partialResults: true,
         listenMode: ListenMode.dictation,
       );
       
-      // Complete with null after duration if nothing found
-      Future.delayed(duration, () {
+      _isListening = true;
+
+      // Fail-safe timeout
+      // If the engine hangs or doesn't report status, force complete
+      Future.delayed(duration + const Duration(seconds: 2), () {
          if (!completer.isCompleted) {
            completer.complete(null);
            _speechToText.stop();
@@ -193,7 +143,7 @@ class VoiceControlService {
       print("Error listening for keywords: $e");
       if (!completer.isCompleted) completer.complete(null);
     }
-
+    
     return completer.future;
   }
 }
