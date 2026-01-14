@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../main.dart';
 import 'contacts_page.dart';
 import 'face_recognition_screen.dart';
+import 'navigation_screen.dart';
 import '../services/contact_service.dart';
 import '../services/tts_service.dart';
 import '../services/face_storage_service.dart';
@@ -60,6 +61,9 @@ class _FeatureCarouselState extends State<FeatureCarousel> {
               case 2:
                 pageName = "Face Recognition";
                 break;
+              case 3:
+                pageName = "Navigation Mode";
+                break;
               default:
                 pageName = "";
             }
@@ -81,6 +85,7 @@ class _FeatureCarouselState extends State<FeatureCarousel> {
             ttsService: widget.ttsService,
             isActive: _currentPage == 2,
           ),
+          NavigationScreen(ttsService: widget.ttsService),
         ],
       ),
       bottomNavigationBar: BottomNavigationBar(
@@ -88,6 +93,7 @@ class _FeatureCarouselState extends State<FeatureCarousel> {
         selectedItemColor: Colors.blueAccent,
         unselectedItemColor: Colors.grey,
         currentIndex: _currentPage,
+        type: BottomNavigationBarType.fixed, // Needed for 4+ items
         onTap: (index) {
             if (_currentPage == index) return;
             
@@ -102,6 +108,7 @@ class _FeatureCarouselState extends State<FeatureCarousel> {
           BottomNavigationBarItem(icon: Icon(Icons.camera_alt), label: "Vision"),
           BottomNavigationBarItem(icon: Icon(Icons.perm_contact_calendar), label: "Contacts"),
           BottomNavigationBarItem(icon: Icon(Icons.face), label: "Faces"),
+          BottomNavigationBarItem(icon: Icon(Icons.navigation), label: "Nav"),
         ],
       ),
     );
