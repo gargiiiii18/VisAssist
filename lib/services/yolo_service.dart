@@ -1,7 +1,9 @@
+import 'dart:math';
 import 'package:flutter_vision/flutter_vision.dart';
 import 'package:camera/camera.dart';
 
 class YoloService {
+
   late FlutterVision _vision;
   bool _isLoaded = false;
 
@@ -12,13 +14,12 @@ class YoloService {
     try {
       await _vision.loadYoloModel(
         labels: 'assets/models/labels.txt',
-        modelPath: 'assets/models/yolov5s_f16.tflite',
-        modelVersion: "yolov5",
+        modelPath: 'assets/models/yolov8n_float16.tflite',
+        modelVersion: "yolov8",
         numThreads: 1, // Optimize for device capability
         useGpu: true,
       );
       _isLoaded = true;
-      // print("YOLO Model Loaded Successfully");
     } catch (e) {
       // print("Error loading YOLO model: $e");
     }
