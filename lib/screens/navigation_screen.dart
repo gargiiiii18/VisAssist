@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -45,6 +47,7 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
   LatLng? _lastRouteCalculationPoint;
   bool _isRecalculating = false;
   bool _manualCameraMove = false;
+  bool _ignoreNextCameraMove = false;
 
   @override
   bool get wantKeepAlive => true;
@@ -127,6 +130,7 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
     
     // Animate camera if map is ready and not navigating yet
     if (_mapController != null && !_isNavigating) {
+        _ignoreNextCameraMove = true;
         _mapController!.animateCamera(CameraUpdate.newCameraPosition(
             CameraPosition(target: _currentLocation!, zoom: 15)
         ));
@@ -197,6 +201,7 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
     _currentInstruction = firstInstr; // Update UI with clean text
 
     // Camera follow
+    _ignoreNextCameraMove = true;
     _mapController?.animateCamera(CameraUpdate.newCameraPosition(
         CameraPosition(target: _currentLocation!, zoom: 18, tilt: 45, bearing: 0)
     ));
@@ -224,6 +229,7 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
             
             // Follow User (only if not manually panning)
             if (!_manualCameraMove) {
+              _ignoreNextCameraMove = true;
               _mapController?.animateCamera(CameraUpdate.newCameraPosition(
                   CameraPosition(
                       target: newLoc, 
@@ -453,10 +459,11 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
                                    _destinationLocation = coords;
                                    _destController.text = selection['description'];
                                    _updateMarkers();
-                                });
-                                // Focus map on destination briefly
-                                _mapController?.animateCamera(CameraUpdate.newLatLng(coords));
-                            }
+                                 });
+                                 // Focus map on destination briefly
+                                 _ignoreNextCameraMove = true;
+                                 _mapController?.animateCamera(CameraUpdate.newLatLng(coords));
+                             }
                          },
                          fieldViewBuilder: (context, textEditingController, focusNode, onFieldSubmitted) {
                             textEditingController.addListener(() {
@@ -531,13 +538,17 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
                         scrollGesturesEnabled: true,
                         tiltGesturesEnabled: true,
                         zoomGesturesEnabled: true,
+                        gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>[
+                          Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
+                        ].toSet(),
                         onCameraMoveStarted: () {
-                          // If user moves camera manually, stop auto-following
-                          if (_isNavigating) {
-                            setState(() {
-                              _manualCameraMove = true;
-                            });
+                          if (_ignoreNextCameraMove) {
+                            _ignoreNextCameraMove = false;
+                            return;
                           }
+                          setState(() {
+                            _manualCameraMove = true;
+                          });
                         },
                     ),
                 ),
@@ -558,7 +569,7 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
             ),
             
             // Re-center Button
-            if (_isNavigating && _manualCameraMove)
+            if (_manualCameraMove)
              Positioned(
                 bottom: 120, // Above instruction overlay
                 right: 20,
@@ -568,14 +579,15 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
                    mini: true,
                    child: const Icon(Icons.my_location, color: Colors.blue),
                    onPressed: () {
-                     setState(() {
-                       _manualCameraMove = false;
-                     });
-                     if (_currentLocation != null) {
-                       _mapController?.animateCamera(CameraUpdate.newCameraPosition(
-                         CameraPosition(target: _currentLocation!, zoom: 18, tilt: 45)
-                       ));
-                     }
+                      setState(() {
+                        _manualCameraMove = false;
+                      });
+                      if (_currentLocation != null) {
+                        _ignoreNextCameraMove = true;
+                        _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+                          CameraPosition(target: _currentLocation!, zoom: 18, tilt: 45)
+                        ));
+                      }
                    },
                 ),
              ),
