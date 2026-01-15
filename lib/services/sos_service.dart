@@ -17,20 +17,21 @@ class SosService {
   
   // Fall Detection Parameters
   // 1. Free Fall: Phone dropping (near 0g)
-  static const double _freeFallThreshold = 3.0; // ~0.3g
+  static const double _freeFallThreshold = 2.5; // ~0.25g (Lowered to be stricter)
   
-  // 2. Impact: Hitting the ground
-  //    Lowered to 20.0 (~2g) because soft surfaces absorb energy.
-  //    However, to prevent false positives from jumps/shakes, we require Free Fall First.
-  static const double _impactThreshold = 20.0; 
+  // 2. Impact: Hitting the ground (Minimum 3g for a real fall impact)
+  static const double _impactThreshold = 30.0; 
   
-  // 3. Stillness: Laying on ground
-  static const double _gravityThresholdLo = 5.0;  // ~0.5g
-  static const double _gravityThresholdHi = 15.0; // ~1.5g
+  // 3. Stillness: Laying on ground (Must be near 1g)
+  static const double _gravityThresholdLo = 8.5;  // ~0.85g
+  static const double _gravityThresholdHi = 11.5; // ~1.15g
   
   bool _possibleFallDetected = false;
   bool _freeFallDetected = false;
   DateTime? _freeFallTime;
+  
+  int _consecutiveStillSamples = 0;
+  static const int _requiredStillSamples = 15; // At 20Hz, this is ~0.75s of continuous stillness
   
   Timer? _fallConfirmationTimer;
   double _lastMagnitude = 9.8;
@@ -44,65 +45,57 @@ class SosService {
   void startMonitoring() {
     if (_isMonitoring) return;
     
+    // Most devices update at ~20-50Hz
     _accelSubscription = accelerometerEvents.listen((AccelerometerEvent event) {
       double magnitude = sqrt(event.x * event.x + event.y * event.y + event.z * event.z);
       _lastMagnitude = magnitude;
 
-      // NEW: soft free-fall check for short/soft drops
-      bool freeFallLike = magnitude < 6.0;
-
       if (!_possibleFallDetected) {
-         // Check for Free Fall (Precursor)
-         if (magnitude < _freeFallThreshold || freeFallLike) {
+         // Step 1: Detect Free Fall (Weightlessness)
+         // True free fall is < 1.0, but we allow 2.5 for tumbling/soft drops
+         if (magnitude < _freeFallThreshold) {
              _freeFallDetected = true;
              _freeFallTime = DateTime.now();
-             // print("Free Fall Detected ($magnitude)");
          }
          
-         // Check if Free Fall was recent (within 0.5s)
+         // Step 2: Detect Impact shortly after Free Fall
          bool freeFallRecent = _freeFallDetected && 
             _freeFallTime != null && 
-            DateTime.now().difference(_freeFallTime!).inMilliseconds < 1000;
+            DateTime.now().difference(_freeFallTime!).inMilliseconds < 800;
 
-         // Check for Impact
          if (magnitude > _impactThreshold) {
-             // If impact happens shortly after free fall, it's very likely a drop
-             if (freeFallRecent) {
+             if (freeFallRecent || magnitude > 45.0) { // High threshold (4.5g) for trip/fall without clear free fall
                  _possibleFallDetected = true;
-                 _freeFallDetected = false; // Reset
-                 // print(">>> IMPACT DETECTED ($magnitude) AFTER FREE FALL. Check Stability...");
+                 _freeFallDetected = false;
+                 _consecutiveStillSamples = 0;
                  
+                 // Wait a moment for the phone to settle after impact before checking stillness
                  _fallConfirmationTimer?.cancel();
-                 _fallConfirmationTimer = Timer(const Duration(seconds: 3), () {
-                     _checkFinalStability();
-                 });
-             } else if (magnitude > 35.0) { 
-                 // Super hard impact (3.5g) triggers detection even without free fall (e.g. running trip)
-                 _possibleFallDetected = true;
-                  // print(">>> HARD IMPACT ($magnitude). Check Stability...");
-                 _fallConfirmationTimer?.cancel();
-                 _fallConfirmationTimer = Timer(const Duration(seconds: 3), () {
-                     _checkFinalStability();
+                 _fallConfirmationTimer = Timer(const Duration(milliseconds: 1500), () {
+                     // The actual check logic is moved into the stream listener
+                     // to ensure continuous stillness is monitored
                  });
              }
          }
+      } else {
+          // Step 3: Verify Stillness (Post-Impact)
+          // If the user is walking, the magnitude will fluctuate. 
+          // If fallen, the phone is resting near 9.8.
+          if (_fallConfirmationTimer != null && !_fallConfirmationTimer!.isActive) {
+              if (magnitude >= _gravityThresholdLo && magnitude <= _gravityThresholdHi) {
+                  _consecutiveStillSamples++;
+                  if (_consecutiveStillSamples >= _requiredStillSamples) {
+                      _triggerFall();
+                  }
+              } else {
+                  // Movement detected during the "stillness" phase, likely a false positive (walking/running)
+                  _possibleFallDetected = false;
+                  _consecutiveStillSamples = 0;
+              }
+          }
       }
     });
     _isMonitoring = true;
-  }
-
-  void _checkFinalStability() {
-      // Step 3: Check if the phone is now relatively still (near 1g)
-      // If the user is running, magnitude will likely fluctuate or be high.
-      // If fallen, it should be resting (~9.8).
-      
-      if (_lastMagnitude >= _gravityThresholdLo && _lastMagnitude <= _gravityThresholdHi) {
-          // Confirmed Fall
-          _triggerFall();
-      } else {
-          // print(">>> False Alarm: Phone is still moving or orientation invalid ($_lastMagnitude)");
-          _possibleFallDetected = false; 
-      }
   }
 
   void stopMonitoring() {
@@ -110,6 +103,7 @@ class SosService {
     _fallConfirmationTimer?.cancel();
     _isMonitoring = false;
     _possibleFallDetected = false;
+    _consecutiveStillSamples = 0;
   }
 
   void _triggerFall() {
