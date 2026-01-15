@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../services/navigation_service.dart';
@@ -18,14 +17,20 @@ class NavigationScreen extends StatefulWidget {
 
 class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepAliveClientMixin {
   final NavigationService _navService = NavigationService();
-  final MapController _mapController = MapController();
   final TextEditingController _destController = TextEditingController();
+  
+  GoogleMapController? _mapController;
   
   LatLng? _currentLocation;
   LatLng? _destinationLocation;
-  List<LatLng> _routePoints = [];
+  
+  Set<Polyline> _polylines = {};
+  Set<Marker> _markers = {};
+  
+  // Directions API Step Data
   List<dynamic> _steps = [];
   int _currentStepIndex = 0;
+  
   bool _isNavigating = false;
   String _currentInstruction = "Enter destination to start";
   Box? _navBox;
@@ -33,10 +38,13 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
   StreamSubscription<Position>? _positionStream;
 
   // Constants
-  static const double _voiceTriggerDistance = 50.0; // meters
-  static const double _rerouteThreshold = 50.0; // meters
+  static const double _voiceTriggerDistance = 40.0; // meters
+  static const double _rerouteThreshold = 60.0; // meters
+  static const double _minMovementForReroute = 20.0; // meters
 
+  LatLng? _lastRouteCalculationPoint;
   bool _isRecalculating = false;
+  bool _manualCameraMove = false;
 
   @override
   bool get wantKeepAlive => true;
@@ -52,6 +60,7 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
   void dispose() {
     _positionStream?.cancel();
     _destController.dispose();
+    _mapController?.dispose();
     super.dispose();
   }
 
@@ -68,7 +77,7 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
             setState(() {
                 _destinationLocation = LatLng(lat, lon);
                 _destController.text = name ?? "Restored Destination";
-                _isNavigating = true; // Set navigating true so UI shows map
+                _isNavigating = true; 
                 _currentInstruction = "Resuming navigation...";
             });
             
@@ -113,17 +122,29 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
     Position position = await Geolocator.getCurrentPosition();
     setState(() {
       _currentLocation = LatLng(position.latitude, position.longitude);
+      _updateMarkers();
     });
+    
+    // Animate camera if map is ready and not navigating yet
+    if (_mapController != null && !_isNavigating) {
+        _mapController!.animateCamera(CameraUpdate.newCameraPosition(
+            CameraPosition(target: _currentLocation!, zoom: 15)
+        ));
+    }
   }
 
   void _startNavigation({bool isResume = false}) async {
+    setState(() {
+      _manualCameraMove = false;
+    });
     if (_destController.text.isEmpty || _currentLocation == null) {
       if (!isResume) widget.ttsService.speak("Please enter a destination and ensure GPS is on.");
       return;
     }
     
-    // 1. Resolve Destination (if not already selected via Autocomplete)
+    // 1. Resolve Destination
     if (_destinationLocation == null) {
+        // Use text search fallback if no place ID selected
         final dest = await _navService.getCoordinates(_destController.text);
         if (dest == null) {
           widget.ttsService.speak("Address not found.");
@@ -146,50 +167,99 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
 
     // 3. Parse Route
     final route = routeData['routes'][0];
-    final geometry = route['geometry']['coordinates'] as List; // GeoJSON [lon, lat]
+    final overviewPolyline = route['overview_polyline']['points'];
     final legs = route['legs'][0];
     final steps = legs['steps'] as List;
 
+    // Decode polyline
+    final List<LatLng> decodedPoints = _navService.decodePolyline(overviewPolyline);
+
     setState(() {
-      _routePoints = geometry.map<LatLng>((p) => LatLng(p[1], p[0])).toList();
+      _polylines = {
+          Polyline(
+              polylineId: const PolylineId("route"),
+              points: decodedPoints,
+              color: Colors.blue,
+              width: 5
+          )
+      };
       _steps = steps;
       _currentStepIndex = 0;
       _isNavigating = true;
+      _lastRouteCalculationPoint = _currentLocation;
       _currentInstruction = "Starting navigation to ${_destController.text}";
+      _updateMarkers();
     });
-    
-    // Center map
-    _mapController.move(_currentLocation!, 15);
-    widget.ttsService.speak("Starting navigation. ${_parseInstruction(steps[0])}");
+
+    final firstInstr = _parseInstruction(steps[0]['html_instructions']);
+    // Filter html tags from TTS
+    widget.ttsService.speak("Starting navigation. $firstInstr");
+    _currentInstruction = firstInstr; // Update UI with clean text
+
+    // Camera follow
+    _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+        CameraPosition(target: _currentLocation!, zoom: 18, tilt: 45, bearing: 0)
+    ));
 
     // 4. Start Tracking
     if (_positionStream == null) {
-       _startLiveTracking();
+       _startLiveTracking(decodedPoints);
     }
   }
 
-  void _startLiveTracking() {
+  void _startLiveTracking(List<LatLng> routePath) {
     _positionStream = Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
             accuracy: LocationAccuracy.bestForNavigation, 
-            distanceFilter: 5 
+            distanceFilter: 5 // Ignore jitter < 5m
         )
     ).listen((Position position) {
         final newLoc = LatLng(position.latitude, position.longitude);
-        _currentLocation = newLoc;
-        _mapController.move(newLoc, 16);
         
-        _checkProgress(newLoc);
+        if (mounted) {
+            setState(() {
+                _currentLocation = newLoc;
+                _updateMarkers();
+            });
+            
+            // Follow User (only if not manually panning)
+            if (!_manualCameraMove) {
+              _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+                  CameraPosition(
+                      target: newLoc, 
+                      zoom: 18, 
+                      tilt: 45,
+                      bearing: position.heading // Rotate map with user heading
+                  )
+              ));
+            }
+            
+            _checkProgress(newLoc, routePath);
+        }
     });
   }
 
-  void _checkProgress(LatLng currentLoc) {
-    if (_isRecalculating || _routePoints.isEmpty) return;
+  void _checkProgress(LatLng currentLoc, List<LatLng> routePath) {
+    if (_isRecalculating || _polylines.isEmpty || _lastRouteCalculationPoint == null) return;
 
-    // 1. Check for Deviation
-    if (_isOffRoute(currentLoc)) {
-       _recalculateRoute(currentLoc);
-       return;
+    // 0. Only check for deviation if we've moved significantly from where the route was last calculated
+    // This prevents recalculation loops when stationary but slightly off-road.
+    final distFromStart = Geolocator.distanceBetween(
+        currentLoc.latitude, currentLoc.longitude,
+        _lastRouteCalculationPoint!.latitude, _lastRouteCalculationPoint!.longitude
+    );
+    
+    if (distFromStart < _minMovementForReroute) {
+        // We haven't moved enough to justify a reroute even if we look "off route"
+        return;
+    }
+
+    // 1. Check for Deviation (Simple check against polyline points)
+    // Note: For production, need robust point-to-segment distance. 
+    // Here we check min distance to ANY point on route > threshold
+    if (_isOffRoute(currentLoc, routePath)) {
+        _recalculateRoute(currentLoc);
+        return;
     }
 
     if (_steps.isEmpty || _currentStepIndex >= _steps.length) {
@@ -197,20 +267,24 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
        return;
     }
 
-    // Check distance to next maneuver
+    // Check distance to end of current step
     final currentStep = _steps[_currentStepIndex];
-    final maneuverLoc = currentStep['maneuver']['location']; // [lon, lat]
-    final maneuverLatLng = LatLng(maneuverLoc[1], maneuverLoc[0]);
+    final endLoc = currentStep['end_location'];
+    final endLatLng = LatLng(endLoc['lat'], endLoc['lng']);
     
-    final distance = const Distance().as(LengthUnit.Meter, currentLoc, maneuverLatLng);
+    final distance = Geolocator.distanceBetween(
+        currentLoc.latitude, currentLoc.longitude, 
+        endLatLng.latitude, endLatLng.longitude
+    );
     
     if (distance < _voiceTriggerDistance) {
        // Announce next step
        if (_currentStepIndex + 1 < _steps.length) {
           final nextStep = _steps[_currentStepIndex + 1];
-          final instruction = _parseInstruction(nextStep);
+          final rawInstr = nextStep['html_instructions'];
+          final instruction = _parseInstruction(rawInstr);
           
-          if (_currentInstruction != instruction) { // Prevent repeat spam
+          if (_currentInstruction != instruction) { 
               widget.ttsService.speak("In 50 meters, $instruction");
               setState(() {
                 _currentInstruction = instruction;
@@ -223,63 +297,23 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
     }
   }
   
-  // --- Rerouting Logic ---
-
-  bool _isOffRoute(LatLng currentPos) {
-      if (_routePoints.length < 2) return false;
-
+  bool _isOffRoute(LatLng currentPos, List<LatLng> routePath) {
+      if (routePath.isEmpty) return false;
+      
+      // Check distance to closest POINT on polyline (Approx for speed)
       double minDistance = double.infinity;
-      const distanceCalc = Distance();
-
-      // Find distance to closest segment
-      for (int i = 0; i < _routePoints.length - 1; i++) {
-          final start = _routePoints[i];
-          final end = _routePoints[i+1];
-          final d = _distanceToSegment(currentPos, start, end, distanceCalc);
+      
+      for (var p in routePath) {
+          final d = Geolocator.distanceBetween(
+              currentPos.latitude, currentPos.longitude, 
+              p.latitude, p.longitude
+          );
           if (d < minDistance) minDistance = d;
-          
-          if (minDistance < _rerouteThreshold) return false; 
+          if (minDistance < _rerouteThreshold) return false;
       }
       
+      print("🔀 Deviation Detected! Min Distance to route: ${minDistance.toStringAsFixed(2)}m (Threshold: $_rerouteThreshold m)");
       return minDistance > _rerouteThreshold;
-  }
-  
-  double _distanceToSegment(LatLng P, LatLng A, LatLng B, Distance distanceCalc) {
-      final double x = P.latitude; 
-      final double y = P.longitude;
-      
-      final double x1 = A.latitude;
-      final double y1 = A.longitude;
-      
-      final double x2 = B.latitude;
-      final double y2 = B.longitude;
-
-      final double A_x = x - x1;
-      final double A_y = y - y1;
-      final double B_x = x2 - x1;
-      final double B_y = y2 - y1;
-
-      final double dot = A_x * B_x + A_y * B_y;
-      final double len_sq = B_x * B_x + B_y * B_y;
-      
-      double param = -1;
-      if (len_sq != 0) // in case of 0 length line
-          param = dot / len_sq;
-
-      double xx, yy;
-
-      if (param < 0) {
-        xx = x1;
-        yy = y1;
-      } else if (param > 1) {
-        xx = x2;
-        yy = y2;
-      } else {
-        xx = x1 + param * B_x;
-        yy = y1 + param * B_y;
-      }
-
-      return distanceCalc.as(LengthUnit.Meter, P, LatLng(xx, yy));
   }
   
   Future<void> _recalculateRoute(LatLng currentLoc) async {
@@ -298,30 +332,41 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
       }
 
       final route = routeData['routes'][0];
-      final geometry = route['geometry']['coordinates'] as List;
-      final legs = route['legs'][0];
-      final steps = legs['steps'] as List;
+      final overviewPolyline = route['overview_polyline']['points'];
+      final steps = route['legs'][0]['steps'] as List;
+      final decodedPoints = _navService.decodePolyline(overviewPolyline);
 
       if (mounted) {
         setState(() {
-          _routePoints = geometry.map<LatLng>((p) => LatLng(p[1], p[0])).toList();
+          _polylines = {
+              Polyline(
+                  polylineId: const PolylineId("route"),
+                  points: decodedPoints,
+                  color: Colors.blue,
+                  width: 5
+              )
+          };
           _steps = steps;
           _currentStepIndex = 0;
+          _lastRouteCalculationPoint = currentLoc;
           _isRecalculating = false;
         });
         
+        // Update live tracking with new path reference
+        _positionStream?.cancel();
+        _startLiveTracking(decodedPoints); // Restart stream with new path check
+
         if (steps.isNotEmpty) {
-           final firstInstr = _parseInstruction(steps[0]);
+           final firstInstr = _parseInstruction(steps[0]['html_instructions']);
            widget.ttsService.speak("New route found. $firstInstr");
            setState(() => _currentInstruction = firstInstr);
         }
       }
   }
 
-  // --- End Rerouting Logic ---
-
   void _finishNavigation() {
      _isNavigating = false;
+     _manualCameraMove = false;
      _positionStream?.cancel();
      _positionStream = null;
      
@@ -334,22 +379,41 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
      
      setState(() {
        _currentInstruction = "Navigation Stopped";
-       _routePoints = [];
+       _polylines = {};
        _destController.clear();
        _destinationLocation = null;
+       
+       // Zoom out to see location
+       _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+           CameraPosition(target: _currentLocation ?? const LatLng(0,0), zoom: 15)
+       ));
      });
   }
 
-  String _parseInstruction(Map step) {
-      final type = step['maneuver']['type']; 
-      final modifier = step['maneuver']['modifier'];
-      final name = step['name']; 
-      
-      String text = "$type $modifier";
-      if (name != null && name.toString().isNotEmpty) {
-          text += " onto $name";
+  void _updateMarkers() {
+      _markers.clear();
+      if (_currentLocation != null) {
+          _markers.add(Marker(
+              markerId: const MarkerId("current"),
+              position: _currentLocation!,
+              icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+              infoWindow: const InfoWindow(title: "You")
+          ));
       }
-      return text;
+      if (_destinationLocation != null) {
+          _markers.add(Marker(
+              markerId: const MarkerId("dest"),
+              position: _destinationLocation!,
+              icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+              infoWindow: const InfoWindow(title: "Destination")
+          ));
+      }
+  }
+
+  // Remove HTML tags from Google instructions
+  String _parseInstruction(String htmlText) {
+      RegExp exp = RegExp(r"<[^>]*>", multiLine: true, caseSensitive: true);
+      return htmlText.replaceAll(exp, '');
   }
 
   @override
@@ -359,14 +423,6 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
       appBar: AppBar(
         title: const Text("Turn-by-Turn Navigation"), 
         backgroundColor: Colors.black,
-        actions: [
-          if (_isNavigating)
-             IconButton(
-               icon: const Icon(Icons.cancel, color: Colors.red),
-               onPressed: _finishNavigation,
-               tooltip: "Stop Navigation",
-             )
-        ],
       ),
       body: Stack(
          children: [
@@ -385,15 +441,22 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
                            }
                            return await _navService.getSuggestions(textEditingValue.text);
                          },
-                         displayStringForOption: (Map<String, dynamic> option) => option['display_name'] ?? '',
-                         onSelected: (Map<String, dynamic> selection) {
-                            final lat = double.parse(selection['lat']);
-                            final lon = double.parse(selection['lon']);
+                         displayStringForOption: (Map<String, dynamic> option) => option['description'] ?? '',
+                         onSelected: (Map<String, dynamic> selection) async {
+                            final placeId = selection['place_id'];
                             
-                            setState(() {
-                               _destinationLocation = LatLng(lat, lon);
-                               _destController.text = selection['display_name'];
-                            });
+                            // Get Coords from details
+                            final coords = await _navService.getPlaceDetails(placeId);
+                            
+                            if (coords != null) {
+                                setState(() {
+                                   _destinationLocation = coords;
+                                   _destController.text = selection['description'];
+                                   _updateMarkers();
+                                });
+                                // Focus map on destination briefly
+                                _mapController?.animateCamera(CameraUpdate.newLatLng(coords));
+                            }
                          },
                          fieldViewBuilder: (context, textEditingController, focusNode, onFieldSubmitted) {
                             textEditingController.addListener(() {
@@ -417,7 +480,7 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
                               child: Material(
                                 elevation: 4.0,
                                 child: SizedBox(
-                                  width: MediaQuery.of(context).size.width - 32, // Match padding
+                                  width: MediaQuery.of(context).size.width - 32, 
                                   child: ListView.builder(
                                     padding: EdgeInsets.zero,
                                     shrinkWrap: true,
@@ -425,7 +488,7 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
                                     itemBuilder: (BuildContext context, int index) {
                                       final option = options.elementAt(index);
                                       return ListTile(
-                                        title: Text(option['display_name'] ?? ''),
+                                        title: Text(option['description'] ?? ''),
                                         onTap: () {
                                           onSelected(option);
                                         },
@@ -450,48 +513,33 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
                 Expanded(
                   child: _currentLocation == null 
                     ? const Center(child: CircularProgressIndicator())
-                    : FlutterMap(
-                        mapController: _mapController,
-                        options: MapOptions(
-                          initialCenter: _currentLocation!,
-                          initialZoom: 15.0,
+                    : GoogleMap(
+                        initialCameraPosition: CameraPosition(
+                            target: _currentLocation!,
+                            zoom: 15
                         ),
-                        children: [
-                          TileLayer(
-                            urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                            userAgentPackageName: 'com.example.fyp_app',
-                          ),
-                          if (_routePoints.isNotEmpty)
-                            PolylineLayer(
-                              polylines: [
-                                Polyline(
-                                  points: _routePoints,
-                                  strokeWidth: 4.0,
-                                  color: Colors.blue,
-                                ),
-                              ],
-                            ),
-                          MarkerLayer(
-                            markers: [
-                              // Current Location
-                              Marker(
-                                point: _currentLocation!,
-                                width: 40,
-                                height: 40,
-                                child: const Icon(Icons.navigation, color: Colors.blue, size: 40),
-                              ),
-                              // Destination
-                              if (_destinationLocation != null)
-                                Marker(
-                                  point: _destinationLocation!,
-                                  width: 40,
-                                  height: 40,
-                                  child: const Icon(Icons.location_on, color: Colors.red, size: 40),
-                                ),
-                            ],
-                          ),
-                        ],
-                      ),
+                        onMapCreated: (GoogleMapController controller) {
+                            _mapController = controller;
+                        },
+                        markers: _markers,
+                        polylines: _polylines,
+                        myLocationEnabled: true, // Native blue dot
+                        myLocationButtonEnabled: true,
+                        mapType: MapType.normal,
+                        zoomControlsEnabled: true,
+                        rotateGesturesEnabled: true,
+                        scrollGesturesEnabled: true,
+                        tiltGesturesEnabled: true,
+                        zoomGesturesEnabled: true,
+                        onCameraMoveStarted: () {
+                          // If user moves camera manually, stop auto-following
+                          if (_isNavigating) {
+                            setState(() {
+                              _manualCameraMove = true;
+                            });
+                          }
+                        },
+                    ),
                 ),
                 
                 // Instruction Overlay
@@ -509,7 +557,30 @@ class _NavigationScreenState extends State<NavigationScreen> with AutomaticKeepA
               ],
             ),
             
-            // X Button Overlay (Alternative to AppBar)
+            // Re-center Button
+            if (_isNavigating && _manualCameraMove)
+             Positioned(
+                bottom: 120, // Above instruction overlay
+                right: 20,
+                child: FloatingActionButton(
+                   heroTag: "recenter",
+                   backgroundColor: Colors.white,
+                   mini: true,
+                   child: const Icon(Icons.my_location, color: Colors.blue),
+                   onPressed: () {
+                     setState(() {
+                       _manualCameraMove = false;
+                     });
+                     if (_currentLocation != null) {
+                       _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+                         CameraPosition(target: _currentLocation!, zoom: 18, tilt: 45)
+                       ));
+                     }
+                   },
+                ),
+             ),
+
+            // X Button Overlay 
             if (_isNavigating)
              Positioned(
                 top: 20,

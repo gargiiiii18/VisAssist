@@ -1,74 +1,184 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:latlong2/latlong.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:flutter_polyline_points/flutter_polyline_points.dart';
+import 'package:uuid/uuid.dart';
 
 class NavigationService {
   
-  // OSRM Base URL (Demo Server)
-  // NOTE: For production, you should host your own OSRM server or use a paid provider limit.
-  final String _osrmBaseUrl = "https://router.project-osrm.org/route/v1/driving";
+  final String _googleApiKey = dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '';
   
-  // Nominatim Base URL (OpenStreetMap Geocoding)
-  final String _nominatimUrl = "https://nominatim.openstreetmap.org/search";
+  // Directions API Base URL
+  final String _directionsUrl = "https://maps.googleapis.com/maps/api/directions/json";
+  
+  // Places API Base URL (New Text Search)
+  final String _placesUrl = "https://places.googleapis.com/v1/places:searchText";
 
-  /// Geocodes an address string to a LatLng.
+  // Autocomplete URL (Places API)
+  final String _autocompleteUrl = "https://maps.googleapis.com/maps/api/place/autocomplete/json";
+  
+  // Place Details URL
+  final String _placeDetailsUrl = "https://maps.googleapis.com/maps/api/place/details/json";
+
+  final Uuid _uuid = const Uuid();
+  String? _sessionToken;
+  http.Client? _suggestionClient;
+
+  NavigationService() {
+      // Initialize a session token for autocomplete
+      _sessionToken = _uuid.v4();
+  }
+
+  /// Geocodes an address or Place ID to a LatLng.
+  /// Ideally, use Place Details if you have a Place ID from autocomplete.
   Future<LatLng?> getCoordinates(String address) async {
-    final url = Uri.parse("$_nominatimUrl?q=$address&format=json&limit=1");
-    try {
-      final response = await http.get(url, headers: {
-        // User-Agent is required by Nominatim
-        'User-Agent': 'FlutterVisionApp/1.0' 
-      });
-
-      if (response.statusCode == 200) {
-        final List data = json.decode(response.body);
-        if (data.isNotEmpty) {
-          final lat = double.parse(data[0]['lat']);
-          final lon = double.parse(data[0]['lon']);
-          return LatLng(lat, lon);
-        }
+      // Fallback: Text Search if manual entry
+      final url = Uri.parse("https://maps.googleapis.com/maps/api/geocode/json?address=${Uri.encodeComponent(address)}&key=$_googleApiKey");
+      
+      print("🌍 Geocoding Request URL: $url");
+      
+      try {
+          final response = await http.get(url);
+          
+          print("📡 Geocoding Response Status: ${response.statusCode}");
+          print("📄 Geocoding Response Body: ${response.body}");
+          
+          if (response.statusCode == 200) {
+              final data = json.decode(response.body);
+              if (data['status'] == 'OK' && data['results'].isNotEmpty) {
+                  final loc = data['results'][0]['geometry']['location'];
+                  return LatLng(loc['lat'], loc['lng']);
+              } else {
+                  print("❌ Geocoding API Error: ${data['status']} - ${data['error_message'] ?? 'No error message'}");
+              }
+          }
+      } catch (e) {
+          print("❌ Geocoding Exception: $e");
       }
-    } catch (e) {
-      print("Geocoding Error: $e");
-    }
-    return null;
+      return null;
+  }
+  
+  Future<LatLng?> getPlaceDetails(String placeId) async {
+       // New Places API (New) - Get Place endpoint
+       final url = Uri.parse("https://places.googleapis.com/v1/$placeId");
+       
+       print("📍 Place Details Request URL: $url");
+       
+       try {
+           final response = await http.get(
+             url,
+             headers: {
+               'X-Goog-Api-Key': _googleApiKey,
+               'X-Goog-FieldMask': 'location',
+             },
+           );
+           
+           print("📡 Place Details Response Status: ${response.statusCode}");
+           print("📄 Place Details Response Body: ${response.body}");
+           
+           if (response.statusCode == 200) {
+               final data = json.decode(response.body);
+               if (data['location'] != null) {
+                   final loc = data['location'];
+                   // Reset session token after a successful selection
+                   _sessionToken = _uuid.v4();
+                   return LatLng(loc['latitude'], loc['longitude']);
+               } else {
+                   print("❌ Place Details Error: No location in response");
+               }
+           } else {
+               print("❌ Place Details Error: Status ${response.statusCode}");
+           }
+       } catch (e) {
+           print("❌ Place Details Exception: $e");
+       }
+       return null;
   }
 
   /// Fetches a list of address suggestions for a query string.
   Future<List<Map<String, dynamic>>> getSuggestions(String query) async {
-    if (query.length < 3) return []; // optimization
+    if (query.length < 3) return []; 
     
-    final url = Uri.parse("$_nominatimUrl?q=$query&format=json&addressdetails=1&limit=5");
+    // Cancel previous
+    _suggestionClient?.close();
+    _suggestionClient = http.Client();
+    
+    // New Places API (New) - Autocomplete endpoint
+    final url = Uri.parse("https://places.googleapis.com/v1/places:autocomplete");
+
+    print("🔍 Autocomplete Request URL: $url");
+    print("🔑 API Key (first 10 chars): ${_googleApiKey.substring(0, 10)}...");
+
     try {
-      final response = await http.get(url, headers: {
-        'User-Agent': 'FlutterVisionApp/1.0' 
-      });
+      // New API uses POST with JSON body
+      final response = await _suggestionClient!.post(
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': _googleApiKey,
+        },
+        body: json.encode({
+          'input': query,
+          'sessionToken': _sessionToken,
+        }),
+      );
+
+      print("📡 Autocomplete Response Status: ${response.statusCode}");
+      print("📄 Autocomplete Response Body: ${response.body}");
 
       if (response.statusCode == 200) {
-        return List<Map<String, dynamic>>.from(json.decode(response.body));
+        final data = json.decode(response.body);
+        if (data['suggestions'] != null) {
+            return List<Map<String, dynamic>>.from(data['suggestions'].map((s) {
+                final placePrediction = s['placePrediction'];
+                if (placePrediction != null) {
+                  return {
+                    'description': placePrediction['text']?['text'] ?? '',
+                    'place_id': placePrediction['placeId'] ?? '',
+                  };
+                }
+                return null;
+            }).where((item) => item != null));
+        } else {
+            print("❌ Autocomplete API Error: No suggestions in response");
+        }
+      } else {
+        print("❌ Autocomplete API Error: Status ${response.statusCode}");
       }
     } catch (e) {
-      print("Autocomplete Error: $e");
+       print("❌ Autocomplete Exception: $e");
     }
     return [];
   }
 
-  /// Fetches a route between start and end points using OSRM.
+  /// Fetches a route between start and end points using Google Directions API.
   Future<Map<String, dynamic>?> getRoute(LatLng start, LatLng end) async {
-    // OSRM Format: {lon},{lat};{lon},{lat}
-    final String coordinates = "${start.longitude},${start.latitude};${end.longitude},${end.latitude}";
-    final url = Uri.parse("$_osrmBaseUrl/$coordinates?steps=true&geometries=geojson&overview=full");
+    final origin = "${start.latitude},${start.longitude}";
+    final destination = "${end.latitude},${end.longitude}";
+    
+    final url = Uri.parse("$_directionsUrl?origin=$origin&destination=$destination&mode=driving&key=$_googleApiKey");
 
     try {
       final response = await http.get(url);
       if (response.statusCode == 200) {
-        return json.decode(response.body);
-      } else {
-        print("OSRM Error: ${response.statusCode} ${response.body}");
+        final data = json.decode(response.body);
+        if (data['status'] == 'OK') {
+           return data;
+        } else {
+            print("Directions API Error: ${data['status']} - ${data['error_message']}");
+        }
       }
     } catch (e) {
       print("Routing Error: $e");
     }
     return null;
+  }
+  
+  /// Helper to decode Polyline
+  List<LatLng> decodePolyline(String encoded) {
+      PolylinePoints polylinePoints = PolylinePoints();
+      List<PointLatLng> result = polylinePoints.decodePolyline(encoded);
+      return result.map((p) => LatLng(p.latitude, p.longitude)).toList();
   }
 }
